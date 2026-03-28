@@ -1,0 +1,23 @@
+{
+  "expo": {
+    "name": "Vera",
+    "slug": "vera",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "backgroundColor": "#10B981"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.vera.app",
+      "deploymentTarget": "14.0"
+    },
+    "android": {
+      "package": "com.vera.app"
+    }
+  }
+}
