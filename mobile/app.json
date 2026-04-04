@@ -5,6 +5,7 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
+    "scheme": "com.vera.app",
     "splash": {
       "backgroundColor": "#10B981"
     },
@@ -14,10 +15,21 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.vera.app",
-      "deploymentTarget": "14.0"
+      "deploymentTarget": "14.0",
+      "infoPlist": {
+        "LSApplicationQueriesSchemes": ["plaidrn"]
+      }
     },
     "android": {
-      "package": "com.vera.app"
+      "package": "com.vera.app",
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "autoVerify": true,
+          "data": [{ "scheme": "com.vera.app" }],
+          "category": ["BROWSABLE", "DEFAULT"]
+        }
+      ]
     }
   }
 }

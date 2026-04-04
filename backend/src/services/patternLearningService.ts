@@ -323,7 +323,7 @@ export class PatternLearningService {
         description: row.description,
         months_tracked: parseInt(row.months_tracked) || 1,
         current_monthly_cost: parseFloat(row.estimated_monthly_cost) || 0,
-        trend: (row.trend_direction as 'improving' | 'worsening' | 'stable') || 'stable',
+        trend: (row.trend_direction as 'improving' | 'worsening' | 'stable' | 'recovering') || 'stable',
         trend_percentage: parseFloat(row.trend_percentage) || 0,
         best_month: bestMonth,
         worst_month: worstMonth,

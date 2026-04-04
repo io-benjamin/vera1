@@ -1,6 +1,5 @@
 import { Router, Request, Response } from 'express';
 import { Pool } from 'pg';
-import { generateWeeklyCheckup, getCurrentWeekDates } from '../services/spendingAnalysisService';
 import { authMiddleware } from '../middleware/auth';
 import { Transaction } from '../models/types';
 
@@ -9,67 +8,6 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
 
-/**
- * GET /api/spending/weekly-checkup
- * Get weekly spending checkup for the authenticated user
- */
-router.get('/weekly-checkup', authMiddleware(pool), async (req: Request, res: Response) => {
-  try {
-    const userId = req.userId!;
-
-    const result = await pool.query(
-      `SELECT t.id, t.account_id, t.amount, t.date,
-              t.name, t.category, t.merchant_name, t.is_pending
-       FROM transactions t
-       JOIN accounts a ON t.account_id = a.id
-       WHERE a.user_id = $1
-       ORDER BY t.date DESC`,
-      [userId]
-    );
-
-    const transactions: Transaction[] = result.rows.map(row => ({
-      id: row.id,
-      account_id: row.account_id,
-      amount: parseFloat(row.amount),
-      date: row.date,
-      name: row.name,
-      category: row.category,
-      merchant_name: row.merchant_name,
-      is_pending: row.is_pending,
-    }));
-
-    if (transactions.length === 0) {
-      return res.status(404).json({ message: 'No spending data available' });
-    }
-
-    const { start, end } = getCurrentWeekDates();
-
-    const prevWeekStart = new Date(start);
-    prevWeekStart.setDate(prevWeekStart.getDate() - 7);
-    const prevWeekEnd = new Date(end);
-    prevWeekEnd.setDate(prevWeekEnd.getDate() - 7);
-
-    const previousWeekTransactions = transactions.filter((tx) => {
-      const txDate = new Date(tx.date);
-      return txDate >= prevWeekStart && txDate <= prevWeekEnd;
-    });
-
-    const checkup = generateWeeklyCheckup(
-      transactions,
-      start,
-      end,
-      previousWeekTransactions.length > 0 ? previousWeekTransactions : undefined
-    );
-
-    res.json({ checkup });
-  } catch (error) {
-    console.error('Error getting weekly checkup:', error);
-    res.status(500).json({
-      message: 'Failed to get weekly checkup',
-      error: error instanceof Error ? error.message : 'Unknown error',
-    });
-  }
-});
 
 /**
  * GET /api/spending/category/:category
@@ -106,6 +44,49 @@ router.get('/category/:category', authMiddleware(pool), async (req: Request, res
     console.error('Error getting category transactions:', error);
     res.status(500).json({
       message: 'Failed to get category transactions',
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+});
+
+/**
+ * GET /api/spending/recent?days=90
+ * Return all transactions for the authenticated user within the last N days
+ */
+router.get('/recent', authMiddleware(pool), async (req: Request, res: Response) => {
+  try {
+    const userId = req.userId!;
+    const days = Math.min(parseInt(req.query.days as string) || 30, 365);
+
+    const result = await pool.query(
+      `SELECT t.id, t.account_id, t.amount, t.date,
+              t.name, t.category, t.merchant_name, t.is_pending
+       FROM transactions t
+       JOIN accounts a ON t.account_id = a.id
+       WHERE a.user_id = $1
+         AND t.date >= CURRENT_DATE - ($2 || ' days')::interval
+       ORDER BY t.date DESC`,
+      [userId, days]
+    );
+
+    const transactions = result.rows.map((row) => ({
+      id: row.id,
+      account_id: row.account_id,
+      amount: parseFloat(row.amount),
+      date: row.date instanceof Date
+        ? row.date.toISOString().split('T')[0]
+        : String(row.date).split('T')[0],
+      name: row.name,
+      category: row.category,
+      merchant_name: row.merchant_name,
+      is_pending: row.is_pending,
+    }));
+
+    res.json({ transactions });
+  } catch (error) {
+    console.error('Error getting recent transactions:', error);
+    res.status(500).json({
+      message: 'Failed to get recent transactions',
       error: error instanceof Error ? error.message : 'Unknown error',
     });
   }

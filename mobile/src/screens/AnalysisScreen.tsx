@@ -1,1008 +1,465 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  TouchableOpacity,
   ActivityIndicator,
+  Modal,
+  Pressable,
   RefreshControl,
   SafeAreaView,
-  Modal,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
 } from 'react-native';
 import * as api from '../services/api';
-import { colors, typography, spacing, borderRadius, shadows } from '../theme';
-import { DetectedHabit, HabitType, AIHabitInsight } from '../types';
+import { colors } from '../theme/colors';
+import { typography } from '../theme/typography';
+import { AIHabitInsight, DetectedHabit } from '../types';
+import PatternRow from '../components/PatternRow';
+import ScoreBar from '../components/ScoreBar';
+import { TrendDirection } from '../types/behavior';
+import { FadeInView } from '../components/FadeInView';
 
-// Habit type display config
-const HABIT_CONFIG: Record<HabitType, { emoji: string; color: string }> = {
-  [HabitType.LATE_NIGHT_SPENDING]: { emoji: '🌙', color: '#6366F1' },
-  [HabitType.WEEKEND_SPLURGE]: { emoji: '🎉', color: '#EC4899' },
-  [HabitType.WEEKLY_RITUAL]: { emoji: '📅', color: '#8B5CF6' },
-  [HabitType.IMPULSE_PURCHASE]: { emoji: '⚡', color: '#F59E0B' },
-  [HabitType.POST_PAYDAY_SURGE]: { emoji: '💰', color: '#10B981' },
-  [HabitType.COMFORT_SPENDING]: { emoji: '🛋️', color: '#F97316' },
-  [HabitType.RECURRING_INDULGENCE]: { emoji: '🔄', color: '#06B6D4' },
-  [HabitType.BINGE_SHOPPING]: { emoji: '🛒', color: '#EF4444' },
-  [HabitType.MEAL_DELIVERY_HABIT]: { emoji: '🍔', color: '#84CC16' },
-  [HabitType.CAFFEINE_RITUAL]: { emoji: '☕', color: '#78350F' },
-};
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function fmt(n: number) {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
+  }).format(n);
+}
+
+function toTrend(raw: string | null): TrendDirection {
+  if (raw === 'increasing' || raw === 'decreasing' || raw === 'recovering') return raw;
+  return 'stable';
+}
+
+// ─── Detail sheet (full-screen modal) ────────────────────────────────────────
+
+interface DetailProps {
+  habit: DetectedHabit | null;
+  insight: AIHabitInsight | null;
+  insightLoading: boolean;
+  onClose: () => void;
+  onAcknowledge: () => void;
+}
+
+function DetailSheet({ habit, insight, insightLoading, onClose, onAcknowledge }: DetailProps) {
+  if (!habit) return null;
+
+  const ins = insight as any;
+
+  return (
+    <Modal visible animationType="slide" transparent={false} onRequestClose={onClose}>
+      <SafeAreaView style={sheet.safe}>
+        {/* Nav */}
+        <View style={sheet.nav}>
+          <Pressable onPress={onClose} hitSlop={12}>
+            <Text style={sheet.navBack}>← Back</Text>
+          </Pressable>
+          <Pressable onPress={onAcknowledge} hitSlop={12}>
+            <Text style={sheet.navAck}>Mark seen</Text>
+          </Pressable>
+        </View>
+
+        <ScrollView
+          style={sheet.scroll}
+          contentContainerStyle={sheet.content}
+          showsVerticalScrollIndicator={false}
+        >
+          {/* Title */}
+          <Text style={sheet.title}>{habit.title}</Text>
+          <Text style={sheet.description}>{habit.description}</Text>
+
+          {/* Stats row */}
+          <View style={sheet.statsRow}>
+            <View style={sheet.stat}>
+              <Text style={sheet.statValue}>{fmt(habit.monthly_impact)}</Text>
+              <Text style={sheet.statLabel}>per month</Text>
+            </View>
+            <View style={sheet.statDivider} />
+            <View style={sheet.statDivider} />
+            <View style={sheet.stat}>
+              <Text style={sheet.statValue}>{habit.occurrence_count}</Text>
+              <Text style={sheet.statLabel}>occurrences</Text>
+            </View>
+          </View>
+
+          {/* AI insight */}
+          {insightLoading ? (
+            <View style={sheet.loadingRow}>
+              <ActivityIndicator color={colors.textTertiary} size="small" />
+              <Text style={sheet.loadingText}>Analysing…</Text>
+            </View>
+          ) : ins ? (
+            <View style={sheet.insightBlock}>
+              {ins.psychological_trigger ? (
+                <View style={sheet.insightSection}>
+                  <Text style={sheet.insightLabel}>Why this happens</Text>
+                  <Text style={sheet.insightBody}>{ins.psychological_trigger}</Text>
+                </View>
+              ) : null}
+              {ins.behavioral_pattern ? (
+                <View style={sheet.insightSection}>
+                  <Text style={sheet.insightLabel}>The pattern</Text>
+                  <Text style={sheet.insightBody}>{ins.behavioral_pattern}</Text>
+                </View>
+              ) : null}
+              {ins.recommended_intervention ? (
+                <View style={sheet.insightSection}>
+                  <Text style={sheet.insightLabel}>One thing to try</Text>
+                  <Text style={[sheet.insightBody, sheet.insightAction]}>
+                    {ins.recommended_intervention}
+                  </Text>
+                </View>
+              ) : null}
+              {ins.potential_savings ? (
+                <View style={sheet.savingsRow}>
+                  <Text style={sheet.savingsLabel}>Potential monthly saving</Text>
+                  <Text style={sheet.savingsValue}>{fmt(ins.potential_savings)}</Text>
+                </View>
+              ) : null}
+            </View>
+          ) : null}
+
+          {/* Sample transactions */}
+          {habit.sample_transactions?.length > 0 && (
+            <View style={sheet.sampleBlock}>
+              <Text style={sheet.blockLabel}>Recent examples</Text>
+              {habit.sample_transactions.map((tx, i) => (
+                <View
+                  key={tx.transaction_id}
+                  style={[sheet.txRow, i < habit.sample_transactions.length - 1 && sheet.txDivider]}
+                >
+                  <Text style={sheet.txMerchant}>{tx.merchant_name ?? 'Transaction'}</Text>
+                  <Text style={sheet.txAmount}>${Math.abs(tx.amount).toFixed(2)}</Text>
+                </View>
+              ))}
+            </View>
+          )}
+        </ScrollView>
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
+const sheet = StyleSheet.create({
+  safe: { flex: 1, backgroundColor: colors.background },
+  nav: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 24,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.divider,
+  },
+  navBack: { fontSize: typography.subhead, color: colors.accent, fontWeight: typography.weights.medium },
+  navAck:  { fontSize: typography.subhead, color: colors.textTertiary, fontWeight: typography.weights.medium },
+  scroll: { flex: 1 },
+  content: { paddingHorizontal: 24, paddingTop: 32, paddingBottom: 60 },
+  title: {
+    fontSize: typography.title2,
+    fontWeight: typography.weights.semibold,
+    color: colors.textPrimary,
+    letterSpacing: -0.3,
+    marginBottom: 10,
+  },
+  description: {
+    fontSize: typography.subhead,
+    color: colors.textSecondary,
+    lineHeight: typography.subhead * 1.6,
+    fontWeight: typography.weights.light,
+    marginBottom: 28,
+  },
+  statsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 20,
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: colors.divider,
+    marginBottom: 32,
+  },
+  stat: { flex: 1, alignItems: 'center', gap: 4 },
+  statValue: { fontSize: typography.headline, fontWeight: typography.weights.semibold, color: colors.textPrimary },
+  statLabel: { fontSize: typography.caption, color: colors.textTertiary },
+  statDivider: { width: 1, height: 28, backgroundColor: colors.divider },
+  loadingRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 20 },
+  loadingText: { fontSize: typography.subhead, color: colors.textTertiary },
+  insightBlock: { gap: 2, marginBottom: 28 },
+  insightSection: { paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: colors.divider },
+  insightLabel: {
+    fontSize: typography.caption,
+    fontWeight: typography.weights.medium,
+    color: colors.textTertiary,
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+    marginBottom: 6,
+  },
+  insightBody: {
+    fontSize: typography.subhead,
+    color: colors.textSecondary,
+    lineHeight: typography.subhead * 1.6,
+    fontWeight: typography.weights.light,
+  },
+  insightAction: { color: colors.textPrimary, fontWeight: typography.weights.medium },
+  savingsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingTop: 20,
+    marginTop: 8,
+  },
+  savingsLabel: { fontSize: typography.subhead, color: colors.textSecondary },
+  savingsValue: { fontSize: typography.headline, fontWeight: typography.weights.semibold, color: colors.textPrimary },
+  sampleBlock: { borderTopWidth: 1, borderTopColor: colors.divider, paddingTop: 28 },
+  blockLabel: {
+    fontSize: typography.caption,
+    fontWeight: typography.weights.medium,
+    color: colors.textTertiary,
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+    marginBottom: 12,
+  },
+  txRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 13 },
+  txDivider: { borderBottomWidth: 1, borderBottomColor: colors.divider },
+  txMerchant: { fontSize: typography.subhead, color: colors.textPrimary },
+  txAmount: { fontSize: typography.subhead, color: colors.textSecondary },
+});
+
+// ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function AnalysisScreen() {
-  const [analysis, setAnalysis] = useState<api.AIAnalysis | null>(null);
   const [habits, setHabits] = useState<DetectedHabit[]>([]);
   const [aiInsights, setAiInsights] = useState<AIHabitInsight[]>([]);
-  const [personality, setPersonality] = useState<api.PersonalityResponse | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [isRefreshing, setIsRefreshing] = useState(false);
-  const [isRefreshingAI, setIsRefreshingAI] = useState(false);
+  const [coachingMessage, setCoachingMessage] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+
   const [selectedHabit, setSelectedHabit] = useState<DetectedHabit | null>(null);
-  const [selectedInsight, setSelectedInsight] = useState<AIHabitInsight | null>(null);
+  const [detailInsight, setDetailInsight] = useState<AIHabitInsight | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
 
-  useEffect(() => {
-    loadData();
-  }, []);
-
-  const loadData = async () => {
-    try {
-      const [analysisRes, habitsRes, personalityRes] = await Promise.allSettled([
-        api.getAnalysis(),
-        api.getHabits(false),
-        api.getPersonality(),
-      ]);
-
-      if (analysisRes.status === 'fulfilled') {
-        setAnalysis(analysisRes.value.analysis);
-      }
-
-      if (habitsRes.status === 'fulfilled') {
-        setHabits(habitsRes.value.habits);
-        setAiInsights(habitsRes.value.ai_insights || []);
-      }
-
-      if (personalityRes.status === 'fulfilled') {
-        setPersonality(personalityRes.value);
-      }
-    } catch (error) {
-      console.log('Error loading analysis data:', error);
-    } finally {
-      setIsLoading(false);
-      setIsRefreshing(false);
+  const load = async () => {
+    const res = await api.getHabits(false).catch(() => null);
+    if (res) {
+      setHabits(res.habits ?? []);
+      setAiInsights(res.ai_insights ?? []);
+      setCoachingMessage((res as any).coaching_message ?? null);
     }
   };
 
-  const handleRefresh = useCallback(() => {
-    setIsRefreshing(true);
-    loadData();
+  useEffect(() => { load().finally(() => setLoading(false)); }, []);
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await load();
+    setRefreshing(false);
   }, []);
 
-  const handleRefreshAI = async () => {
-    setIsRefreshingAI(true);
-    try {
-      const res = await api.refreshAnalysis();
-      setAnalysis(res.analysis);
-    } catch (error) {
-      console.log('Error refreshing AI analysis:', error);
-    } finally {
-      setIsRefreshingAI(false);
-    }
-  };
-
-  const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat('en-US', {
-      style: 'currency',
-      currency: 'USD',
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 0,
-    }).format(amount);
-  };
-
-  const handleHabitPress = async (habit: DetectedHabit) => {
+  const openHabit = async (habit: DetectedHabit) => {
     setSelectedHabit(habit);
+    setDetailInsight(null);
     setDetailLoading(true);
-
     try {
       const detail = await api.getHabitDetail(habit.id);
-      setSelectedInsight(detail.ai_insight);
-    } catch (error) {
-      // Use the insight from the list if detail fails
-      const insight = aiInsights.find((i) => i.habit_type === habit.habit_type);
-      setSelectedInsight(insight || null);
+      setDetailInsight(detail.ai_insight as any);
+    } catch {
+      setDetailInsight(aiInsights.find((i) => i.habit_type === habit.habit_type) ?? null);
     } finally {
       setDetailLoading(false);
     }
   };
 
-  const handleAcknowledge = async () => {
+  const acknowledge = async () => {
     if (!selectedHabit) return;
-
     try {
       await api.acknowledgeHabit(selectedHabit.id);
       setHabits((prev) =>
-        prev.map((h) =>
-          h.id === selectedHabit.id ? { ...h, is_acknowledged: true } : h
-        )
+        prev.map((h) => (h.id === selectedHabit.id ? { ...h, is_acknowledged: true } : h))
       );
-      setSelectedHabit(null);
-    } catch (error) {
-      console.log('Error acknowledging habit:', error);
-    }
+    } catch {}
+    setSelectedHabit(null);
   };
 
-  const getDifficultyColor = (difficulty: string) => {
-    switch (difficulty) {
-      case 'easy':
-        return colors.success;
-      case 'moderate':
-        return colors.warning;
-      case 'hard':
-        return colors.error;
-      default:
-        return colors.textSecondary;
-    }
-  };
-
-  if (isLoading) {
-    return (
-      <SafeAreaView style={styles.safeArea}>
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={colors.accent} />
-          <Text style={styles.loadingText}>Getting your insights...</Text>
-        </View>
-      </SafeAreaView>
-    );
-  }
+  const maxImpact = habits.reduce((m, h) => Math.max(m, h.monthly_impact), 1);
+  const totalImpact = habits.reduce((s, h) => s + h.monthly_impact, 0);
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safe}>
       <ScrollView
-        style={styles.container}
-        contentContainerStyle={styles.contentContainer}
-        refreshControl={
-          <RefreshControl
-            refreshing={isRefreshing}
-            onRefresh={handleRefresh}
-            tintColor={colors.textSecondary}
-          />
-        }
+        style={styles.scroll}
+        contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.textTertiary} />
+        }
       >
         {/* Header */}
-        <View style={styles.header}>
-          <Text style={styles.headerTitle}>Analysis</Text>
-          <Text style={styles.headerSubtitle}>Your personalized spending insights</Text>
-        </View>
-
-        {/* AI Greeting Card */}
-        {analysis && (
-          <View style={styles.greetingCard}>
-            <Text style={styles.greetingText}>{analysis.greeting}</Text>
+        <FadeInView index={0}>
+          <View style={styles.pageHeader}>
+            <Text style={styles.pageTitle}>Analysis</Text>
+            {coachingMessage ? (
+              <Text style={styles.subtitle}>{coachingMessage}</Text>
+            ) : null}
           </View>
-        )}
+        </FadeInView>
 
-        {/* Spending Summary */}
-        {analysis?.spending_summary && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>This Month</Text>
-            <View style={styles.summaryCard}>
-              <View style={styles.summaryMain}>
-                <Text style={styles.summaryAmount}>
-                  {formatCurrency(analysis.spending_summary.total_this_month)}
-                </Text>
-                <Text style={styles.summaryLabel}>Total Spent</Text>
-              </View>
-              <Text style={styles.summaryInsight}>{analysis.spending_summary.insight}</Text>
-
-              {/* Top Merchants */}
-              {analysis.spending_summary.top_merchants.length > 0 && (
-                <View style={styles.merchantsList}>
-                  <Text style={styles.merchantsTitle}>Top Spending</Text>
-                  {analysis.spending_summary.top_merchants.slice(0, 3).map((merchant, idx) => (
-                    <View key={idx} style={styles.merchantRow}>
-                      <Text style={styles.merchantName}>{merchant.name}</Text>
-                      <View style={styles.merchantMeta}>
-                        <Text style={styles.merchantCount}>{merchant.count}x</Text>
-                        <Text style={styles.merchantAmount}>{formatCurrency(merchant.amount)}</Text>
-                      </View>
-                    </View>
-                  ))}
-                </View>
-              )}
-            </View>
+        {loading ? (
+          <View style={styles.loadingBlock}>
+            <ActivityIndicator color={colors.textTertiary} />
           </View>
-        )}
+        ) : (
+          <>
+            {/* ── Patterns ── */}
+            <FadeInView index={1}>
+              <View style={styles.section}>
+                <Text style={styles.sectionLabel}>Spending Patterns</Text>
 
-        {/* Patterns Found */}
-        {analysis?.patterns_found && analysis.patterns_found.length > 0 && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Patterns I Noticed</Text>
-            {analysis.patterns_found.map((pattern, idx) => (
-              <View key={idx} style={styles.patternCard}>
-                <Text style={styles.patternTitle}>{pattern.title}</Text>
-                <Text style={styles.patternDescription}>{pattern.description}</Text>
-                <View style={styles.patternFooter}>
-                  <Text style={styles.patternImpact}>{pattern.impact}</Text>
-                  <Text style={styles.patternSuggestion}>{pattern.suggestion}</Text>
-                </View>
-              </View>
-            ))}
-          </View>
-        )}
-
-        {/* Focus Area */}
-        {analysis?.focus_area && (
-          <View style={styles.focusCard}>
-            <View style={styles.focusHeader}>
-              <Text style={styles.focusLabel}>THIS WEEK'S FOCUS</Text>
-            </View>
-            <Text style={styles.focusTitle}>{analysis.focus_area.title}</Text>
-            <Text style={styles.focusWhy}>{analysis.focus_area.why}</Text>
-            <View style={styles.focusAction}>
-              <Text style={styles.focusActionLabel}>Try this:</Text>
-              <Text style={styles.focusActionText}>{analysis.focus_area.action}</Text>
-            </View>
-          </View>
-        )}
-
-        {/* Wins */}
-        {analysis?.wins && analysis.wins.length > 0 && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Wins</Text>
-            <View style={styles.winsCard}>
-              {analysis.wins.map((win, idx) => (
-                <View key={idx} style={styles.winItem}>
-                  <Text style={styles.winEmoji}>✓</Text>
-                  <Text style={styles.winText}>{win}</Text>
-                </View>
-              ))}
-            </View>
-          </View>
-        )}
-
-        {/* Detected Habits */}
-        {habits.length > 0 && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Spending Habits</Text>
-            <View style={styles.habitsList}>
-              {habits.slice(0, 5).map((habit) => {
-                const config = HABIT_CONFIG[habit.habit_type] || { emoji: '📊', color: colors.accent };
-                const isNew = !habit.is_acknowledged;
-                return (
-                  <TouchableOpacity
-                    key={habit.id}
-                    style={[styles.habitCard, isNew && styles.habitCardNew]}
-                    onPress={() => handleHabitPress(habit)}
-                    activeOpacity={0.7}
-                  >
-                    <View style={[styles.habitIcon, { backgroundColor: config.color + '20' }]}>
-                      <Text style={styles.habitEmoji}>{config.emoji}</Text>
-                    </View>
-                    <View style={styles.habitContent}>
-                      <View style={styles.habitHeader}>
-                        <Text style={styles.habitTitle}>{habit.title}</Text>
-                        {isNew && (
-                          <View style={styles.newBadge}>
-                            <Text style={styles.newBadgeText}>NEW</Text>
-                          </View>
-                        )}
-                      </View>
-                      <Text style={styles.habitDescription} numberOfLines={2}>
-                        {habit.description}
-                      </Text>
-                    </View>
-                    <View style={styles.habitRight}>
-                      <Text style={[styles.habitImpact, { color: config.color }]}>
-                        {formatCurrency(habit.monthly_impact)}/mo
-                      </Text>
-                      <Text style={styles.chevron}>›</Text>
-                    </View>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-          </View>
-        )}
-
-        {/* Personality Summary */}
-        {personality && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Your Spending Personality</Text>
-            <View style={styles.personalityCard}>
-              <Text style={styles.personalityEmoji}>{personality.message.emoji}</Text>
-              <Text style={styles.personalityTitle}>{personality.message.title}</Text>
-              <Text style={styles.personalityDescription} numberOfLines={3}>
-                {personality.message.description}
-              </Text>
-            </View>
-          </View>
-        )}
-
-        {/* Encouragement */}
-        {analysis?.encouragement && (
-          <View style={styles.encouragementCard}>
-            <Text style={styles.encouragementText}>{analysis.encouragement}</Text>
-          </View>
-        )}
-
-        {/* Refresh AI Button */}
-        <TouchableOpacity
-          style={[styles.refreshButton, isRefreshingAI && styles.refreshButtonDisabled]}
-          onPress={handleRefreshAI}
-          disabled={isRefreshingAI}
-          activeOpacity={0.8}
-        >
-          {isRefreshingAI ? (
-            <ActivityIndicator size="small" color={colors.textSecondary} />
-          ) : (
-            <Text style={styles.refreshButtonText}>Get Fresh Insights</Text>
-          )}
-        </TouchableOpacity>
-
-        <View style={styles.bottomSpacer} />
-      </ScrollView>
-
-      {/* Habit Detail Modal */}
-      <Modal
-        visible={!!selectedHabit}
-        animationType="slide"
-        transparent={false}
-        onRequestClose={() => setSelectedHabit(null)}
-      >
-        <SafeAreaView style={styles.modalContainer}>
-          {selectedHabit && (
-            <>
-              {/* Modal Header */}
-              <View style={styles.modalHeader}>
-                <TouchableOpacity onPress={() => setSelectedHabit(null)}>
-                  <Text style={styles.modalClose}>← Back</Text>
-                </TouchableOpacity>
-                <TouchableOpacity onPress={handleAcknowledge}>
-                  <Text style={styles.modalAcknowledge}>Got it</Text>
-                </TouchableOpacity>
-              </View>
-
-              <ScrollView
-                style={styles.modalContent}
-                contentContainerStyle={styles.modalContentContainer}
-              >
-                {/* Habit Header */}
-                <View style={styles.modalHabitHeader}>
-                  <Text style={styles.modalEmoji}>
-                    {HABIT_CONFIG[selectedHabit.habit_type]?.emoji || '📊'}
+                {habits.length === 0 ? (
+                  <Text style={styles.emptyText}>
+                    No patterns detected yet. Sync more transactions to get started.
                   </Text>
-                  <Text style={styles.modalTitle}>{selectedHabit.title}</Text>
-                  <Text style={styles.modalDescription}>{selectedHabit.description}</Text>
-                </View>
-
-                {/* Impact Stats */}
-                <View style={styles.impactStats}>
-                  <View style={styles.impactItem}>
-                    <Text style={styles.impactValue}>
-                      {formatCurrency(selectedHabit.monthly_impact)}
-                    </Text>
-                    <Text style={styles.impactLabel}>Monthly</Text>
-                  </View>
-                  <View style={styles.impactItem}>
-                    <Text style={styles.impactValue}>
-                      {formatCurrency(selectedHabit.annual_impact)}
-                    </Text>
-                    <Text style={styles.impactLabel}>Annual</Text>
-                  </View>
-                  <View style={styles.impactItem}>
-                    <Text style={styles.impactValue}>{selectedHabit.occurrence_count}</Text>
-                    <Text style={styles.impactLabel}>Times</Text>
-                  </View>
-                </View>
-
-                {/* AI Insight */}
-                {detailLoading ? (
-                  <View style={styles.insightLoading}>
-                    <ActivityIndicator size="small" color={colors.accent} />
-                    <Text style={styles.insightLoadingText}>Getting AI insight...</Text>
-                  </View>
-                ) : selectedInsight ? (
-                  <View style={styles.aiInsightCard}>
-                    <Text style={styles.aiInsightTitle}>Why This Happens</Text>
-                    <Text style={styles.aiInsightTrigger}>
-                      {selectedInsight.psychological_trigger}
-                    </Text>
-
-                    <Text style={styles.aiInsightTitle}>The Pattern</Text>
-                    <Text style={styles.aiInsightText}>
-                      {selectedInsight.behavioral_pattern}
-                    </Text>
-
-                    <Text style={styles.aiInsightTitle}>What To Do</Text>
-                    <Text style={styles.aiInsightAction}>
-                      {selectedInsight.recommended_intervention}
-                    </Text>
-
-                    <View style={styles.difficultyRow}>
-                      <Text style={styles.difficultyLabel}>Difficulty to change:</Text>
-                      <Text
-                        style={[
-                          styles.difficultyValue,
-                          { color: getDifficultyColor(selectedInsight.difficulty_to_change) },
-                        ]}
-                      >
-                        {selectedInsight.difficulty_to_change.toUpperCase()}
-                      </Text>
-                    </View>
-
-                    {selectedInsight.alternative_suggestions.length > 0 && (
-                      <>
-                        <Text style={styles.aiInsightTitle}>Alternatives</Text>
-                        {selectedInsight.alternative_suggestions.map((alt, idx) => (
-                          <View key={idx} style={styles.alternativeItem}>
-                            <Text style={styles.alternativeBullet}>{idx + 1}.</Text>
-                            <Text style={styles.alternativeText}>{alt}</Text>
-                          </View>
-                        ))}
-                      </>
-                    )}
-
-                    <View style={styles.savingsCard}>
-                      <Text style={styles.savingsLabel}>Potential Monthly Savings</Text>
-                      <Text style={styles.savingsValue}>
-                        {formatCurrency(selectedInsight.potential_savings)}
-                      </Text>
-                    </View>
-                  </View>
-                ) : null}
-
-                {/* Sample Transactions */}
-                {selectedHabit.sample_transactions && selectedHabit.sample_transactions.length > 0 && (
-                  <View style={styles.sampleSection}>
-                    <Text style={styles.sampleTitle}>Recent Examples</Text>
-                    {selectedHabit.sample_transactions.map((tx, idx) => (
-                      <View key={idx} style={styles.sampleTransaction}>
-                        <Text style={styles.sampleMerchant}>
-                          {tx.merchant_name || 'Transaction'}
-                        </Text>
-                        <Text style={styles.sampleAmount}>
-                          ${Math.abs(tx.amount).toFixed(2)}
-                        </Text>
+                ) : (
+                  <View style={styles.list}>
+                    {habits.map((h, i) => (
+                      <View key={h.id}>
+                        {i > 0 && <View style={styles.divider} />}
+                        <PatternRow
+                          name={h.title}
+                          description={h.description}
+                          monthlyImpact={h.monthly_impact}
+                          trend={toTrend(h.trend)}
+                          isNew={!h.is_acknowledged}
+                          onPress={() => openHabit(h)}
+                        />
                       </View>
                     ))}
                   </View>
                 )}
-              </ScrollView>
-            </>
-          )}
-        </SafeAreaView>
-      </Modal>
+              </View>
+            </FadeInView>
+
+            {/* ── Monthly impact ── */}
+            {habits.length > 0 && (
+              <FadeInView index={2}>
+                <View style={styles.section}>
+                  <Text style={styles.sectionLabel}>Monthly Impact</Text>
+                  <View style={styles.bars}>
+                    {habits
+                      .slice()
+                      .sort((a, b) => b.monthly_impact - a.monthly_impact)
+                      .map((h) => (
+                        <ScoreBar
+                          key={h.id}
+                          label={h.title}
+                          value={h.monthly_impact / maxImpact}
+                          amount={`${fmt(h.monthly_impact)}/mo`}
+                        />
+                      ))}
+                  </View>
+                  <View style={styles.totalRow}>
+                    <Text style={styles.totalLabel}>Total</Text>
+                    <Text style={styles.totalValue}>{fmt(totalImpact)}/mo</Text>
+                  </View>
+                </View>
+              </FadeInView>
+            )}
+          </>
+        )}
+      </ScrollView>
+
+      <DetailSheet
+        habit={selectedHabit}
+        insight={detailInsight}
+        insightLoading={detailLoading}
+        onClose={() => setSelectedHabit(null)}
+        onAcknowledge={acknowledge}
+      />
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: colors.background,
+  safe: { flex: 1, backgroundColor: colors.background },
+  scroll: { flex: 1 },
+  content: { paddingBottom: 80 },
+
+  pageHeader: {
+    paddingHorizontal: 24,
+    paddingTop: 20,
+    paddingBottom: 28,
   },
-  container: {
-    flex: 1,
-  },
-  contentContainer: {
-    paddingHorizontal: spacing.lg,
-  },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: spacing.md,
-  },
-  loadingText: {
-    fontSize: typography.body,
-    color: colors.textSecondary,
-  },
-  header: {
-    paddingVertical: spacing.lg,
-  },
-  headerTitle: {
+  pageTitle: {
     fontSize: typography.largeTitle,
-    fontWeight: typography.weights.bold,
+    fontWeight: typography.weights.semibold,
     color: colors.textPrimary,
-    marginBottom: spacing.xs,
+    letterSpacing: -0.5,
+    marginBottom: 10,
   },
-  headerSubtitle: {
-    fontSize: typography.body,
+  subtitle: {
+    fontSize: typography.subhead,
     color: colors.textSecondary,
+    lineHeight: typography.subhead * 1.6,
+    fontWeight: typography.weights.light,
   },
-  greetingCard: {
-    backgroundColor: colors.accent + '15',
-    borderRadius: borderRadius.lg,
-    padding: spacing.lg,
-    marginBottom: spacing.lg,
-    borderLeftWidth: 4,
-    borderLeftColor: colors.accent,
+
+  loadingBlock: {
+    height: 200,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  greetingText: {
-    fontSize: typography.body,
-    color: colors.textPrimary,
-    lineHeight: 24,
-  },
+
   section: {
-    marginBottom: spacing.xl,
+    paddingHorizontal: 24,
+    paddingBottom: 40,
   },
-  sectionTitle: {
-    fontSize: typography.title3,
-    fontWeight: typography.weights.bold,
-    color: colors.textPrimary,
-    marginBottom: spacing.md,
-  },
-  summaryCard: {
-    backgroundColor: colors.backgroundSecondary,
-    borderRadius: borderRadius.lg,
-    padding: spacing.lg,
-  },
-  summaryMain: {
-    alignItems: 'center',
-    marginBottom: spacing.md,
-  },
-  summaryAmount: {
-    fontSize: typography.largeTitle,
-    fontWeight: typography.weights.bold,
-    color: colors.textPrimary,
-  },
-  summaryLabel: {
+  sectionLabel: {
     fontSize: typography.caption,
-    color: colors.textTertiary,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  summaryInsight: {
-    fontSize: typography.body,
-    color: colors.textSecondary,
-    textAlign: 'center',
-    marginBottom: spacing.md,
-  },
-  merchantsList: {
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
-    paddingTop: spacing.md,
-  },
-  merchantsTitle: {
-    fontSize: typography.caption,
-    fontWeight: typography.weights.semibold,
-    color: colors.textTertiary,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-    marginBottom: spacing.sm,
-  },
-  merchantRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: spacing.xs,
-  },
-  merchantName: {
-    fontSize: typography.body,
-    color: colors.textPrimary,
-    flex: 1,
-  },
-  merchantMeta: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
-  },
-  merchantCount: {
-    fontSize: typography.caption,
-    color: colors.textTertiary,
-  },
-  merchantAmount: {
-    fontSize: typography.body,
-    fontWeight: typography.weights.semibold,
-    color: colors.textPrimary,
-  },
-  patternCard: {
-    backgroundColor: colors.backgroundSecondary,
-    borderRadius: borderRadius.lg,
-    padding: spacing.md,
-    marginBottom: spacing.sm,
-  },
-  patternTitle: {
-    fontSize: typography.headline,
-    fontWeight: typography.weights.semibold,
-    color: colors.textPrimary,
-    marginBottom: spacing.xs,
-  },
-  patternDescription: {
-    fontSize: typography.body,
-    color: colors.textSecondary,
-    lineHeight: 22,
-    marginBottom: spacing.sm,
-  },
-  patternFooter: {
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
-    paddingTop: spacing.sm,
-  },
-  patternImpact: {
-    fontSize: typography.subhead,
-    fontWeight: typography.weights.semibold,
-    color: colors.warning,
-    marginBottom: spacing.xs,
-  },
-  patternSuggestion: {
-    fontSize: typography.subhead,
-    color: colors.success,
-    fontStyle: 'italic',
-  },
-  focusCard: {
-    backgroundColor: colors.accent,
-    borderRadius: borderRadius.lg,
-    padding: spacing.lg,
-    marginBottom: spacing.xl,
-  },
-  focusHeader: {
-    marginBottom: spacing.sm,
-  },
-  focusLabel: {
-    fontSize: typography.caption,
-    fontWeight: typography.weights.bold,
-    color: colors.background,
-    opacity: 0.8,
-    letterSpacing: 1,
-  },
-  focusTitle: {
-    fontSize: typography.title2,
-    fontWeight: typography.weights.bold,
-    color: colors.background,
-    marginBottom: spacing.xs,
-  },
-  focusWhy: {
-    fontSize: typography.body,
-    color: colors.background,
-    opacity: 0.9,
-    marginBottom: spacing.md,
-  },
-  focusAction: {
-    backgroundColor: 'rgba(255,255,255,0.2)',
-    borderRadius: borderRadius.md,
-    padding: spacing.md,
-  },
-  focusActionLabel: {
-    fontSize: typography.caption,
-    fontWeight: typography.weights.semibold,
-    color: colors.background,
-    opacity: 0.8,
-    marginBottom: spacing.xs,
-  },
-  focusActionText: {
-    fontSize: typography.body,
-    color: colors.background,
     fontWeight: typography.weights.medium,
-  },
-  winsCard: {
-    backgroundColor: '#ECFDF5',
-    borderRadius: borderRadius.lg,
-    padding: spacing.md,
-  },
-  winItem: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    marginBottom: spacing.sm,
-  },
-  winEmoji: {
-    fontSize: typography.body,
-    color: colors.success,
-    marginRight: spacing.sm,
-    fontWeight: typography.weights.bold,
-  },
-  winText: {
-    flex: 1,
-    fontSize: typography.body,
-    color: colors.success,
-    lineHeight: 22,
-  },
-  habitsList: {
-    gap: spacing.sm,
-  },
-  habitCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.backgroundSecondary,
-    borderRadius: borderRadius.md,
-    padding: spacing.md,
-  },
-  habitCardNew: {
-    borderWidth: 1,
-    borderColor: colors.accent,
-  },
-  habitIcon: {
-    width: 44,
-    height: 44,
-    borderRadius: borderRadius.md,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: spacing.md,
-  },
-  habitEmoji: {
-    fontSize: 22,
-  },
-  habitContent: {
-    flex: 1,
-  },
-  habitHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs,
-  },
-  habitTitle: {
-    fontSize: typography.headline,
-    fontWeight: typography.weights.semibold,
-    color: colors.textPrimary,
-    marginBottom: 2,
-  },
-  newBadge: {
-    backgroundColor: colors.accent,
-    paddingHorizontal: spacing.xs,
-    paddingVertical: 2,
-    borderRadius: borderRadius.sm,
-    marginBottom: 2,
-  },
-  newBadgeText: {
-    fontSize: 10,
-    fontWeight: typography.weights.bold,
-    color: colors.background,
-  },
-  habitDescription: {
-    fontSize: typography.caption,
-    color: colors.textSecondary,
-    lineHeight: 16,
-  },
-  habitRight: {
-    alignItems: 'flex-end',
-  },
-  habitImpact: {
-    fontSize: typography.subhead,
-    fontWeight: typography.weights.bold,
-  },
-  chevron: {
-    fontSize: typography.title2,
     color: colors.textTertiary,
-    marginTop: 2,
+    letterSpacing: 1.0,
+    textTransform: 'uppercase',
+    marginBottom: 16,
   },
-  personalityCard: {
-    backgroundColor: colors.backgroundSecondary,
-    borderRadius: borderRadius.lg,
-    padding: spacing.lg,
-    alignItems: 'center',
+  list: {
+    borderTopWidth: 1,
+    borderTopColor: colors.divider,
   },
-  personalityEmoji: {
-    fontSize: 48,
-    marginBottom: spacing.sm,
+  divider: {
+    height: 1,
+    backgroundColor: colors.divider,
   },
-  personalityTitle: {
-    fontSize: typography.headline,
-    fontWeight: typography.weights.bold,
-    color: colors.textPrimary,
-    textAlign: 'center',
-    marginBottom: spacing.xs,
-  },
-  personalityDescription: {
+  emptyText: {
     fontSize: typography.subhead,
-    color: colors.textSecondary,
-    textAlign: 'center',
-    lineHeight: 20,
+    color: colors.textTertiary,
+    lineHeight: typography.subhead * 1.6,
+    fontWeight: typography.weights.light,
   },
-  encouragementCard: {
-    backgroundColor: colors.backgroundSecondary,
-    borderRadius: borderRadius.lg,
-    padding: spacing.lg,
-    marginBottom: spacing.lg,
+
+  bars: {
+    borderTopWidth: 1,
+    borderTopColor: colors.divider,
   },
-  encouragementText: {
-    fontSize: typography.body,
-    color: colors.textPrimary,
-    textAlign: 'center',
-    lineHeight: 24,
-    fontStyle: 'italic',
-  },
-  refreshButton: {
-    backgroundColor: colors.backgroundSecondary,
-    borderRadius: borderRadius.md,
-    paddingVertical: spacing.md,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: colors.border,
-    marginBottom: spacing.md,
-  },
-  refreshButtonDisabled: {
-    opacity: 0.6,
-  },
-  refreshButtonText: {
-    fontSize: typography.headline,
-    fontWeight: typography.weights.semibold,
-    color: colors.textPrimary,
-  },
-  bottomSpacer: {
-    height: spacing.xxl,
-  },
-  // Modal styles
-  modalContainer: {
-    flex: 1,
-    backgroundColor: colors.background,
-  },
-  modalHeader: {
+  totalRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
+    paddingTop: 16,
+    marginTop: 4,
+    borderTopWidth: 1,
+    borderTopColor: colors.divider,
   },
-  modalClose: {
-    fontSize: typography.body,
-    color: colors.accent,
-    fontWeight: typography.weights.semibold,
-  },
-  modalAcknowledge: {
-    fontSize: typography.body,
-    color: colors.success,
-    fontWeight: typography.weights.semibold,
-  },
-  modalContent: {
-    flex: 1,
-  },
-  modalContentContainer: {
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.lg,
-  },
-  modalHabitHeader: {
-    alignItems: 'center',
-    marginBottom: spacing.xl,
-  },
-  modalEmoji: {
-    fontSize: 64,
-    marginBottom: spacing.md,
-  },
-  modalTitle: {
-    fontSize: typography.title2,
-    fontWeight: typography.weights.bold,
-    color: colors.textPrimary,
-    textAlign: 'center',
-    marginBottom: spacing.sm,
-  },
-  modalDescription: {
-    fontSize: typography.body,
-    color: colors.textSecondary,
-    textAlign: 'center',
-    lineHeight: 24,
-  },
-  impactStats: {
-    flexDirection: 'row',
-    backgroundColor: colors.backgroundSecondary,
-    borderRadius: borderRadius.lg,
-    padding: spacing.lg,
-    marginBottom: spacing.lg,
-  },
-  impactItem: {
-    flex: 1,
-    alignItems: 'center',
-  },
-  impactValue: {
-    fontSize: typography.title3,
-    fontWeight: typography.weights.bold,
-    color: colors.error,
-  },
-  impactLabel: {
-    fontSize: typography.caption,
+  totalLabel: {
+    fontSize: typography.subhead,
     color: colors.textTertiary,
-    marginTop: spacing.xs,
+    fontWeight: typography.weights.regular,
   },
-  insightLoading: {
-    alignItems: 'center',
-    padding: spacing.xl,
-    gap: spacing.sm,
-  },
-  insightLoadingText: {
-    fontSize: typography.body,
-    color: colors.textSecondary,
-  },
-  aiInsightCard: {
-    backgroundColor: colors.backgroundSecondary,
-    borderRadius: borderRadius.lg,
-    padding: spacing.lg,
-    marginBottom: spacing.lg,
-  },
-  aiInsightTitle: {
+  totalValue: {
     fontSize: typography.headline,
     fontWeight: typography.weights.semibold,
     color: colors.textPrimary,
-    marginBottom: spacing.xs,
-    marginTop: spacing.md,
-  },
-  aiInsightTrigger: {
-    fontSize: typography.body,
-    color: colors.accent,
-    lineHeight: 22,
-  },
-  aiInsightText: {
-    fontSize: typography.body,
-    color: colors.textSecondary,
-    lineHeight: 22,
-  },
-  aiInsightAction: {
-    fontSize: typography.body,
-    color: colors.success,
-    lineHeight: 22,
-    fontWeight: typography.weights.medium,
-  },
-  difficultyRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: spacing.md,
-    gap: spacing.sm,
-  },
-  difficultyLabel: {
-    fontSize: typography.subhead,
-    color: colors.textTertiary,
-  },
-  difficultyValue: {
-    fontSize: typography.subhead,
-    fontWeight: typography.weights.semibold,
-  },
-  alternativeItem: {
-    flexDirection: 'row',
-    marginTop: spacing.xs,
-  },
-  alternativeBullet: {
-    fontSize: typography.body,
-    color: colors.accent,
-    marginRight: spacing.sm,
-    fontWeight: typography.weights.semibold,
-  },
-  alternativeText: {
-    flex: 1,
-    fontSize: typography.body,
-    color: colors.textSecondary,
-    lineHeight: 20,
-  },
-  savingsCard: {
-    backgroundColor: colors.success + '20',
-    borderRadius: borderRadius.md,
-    padding: spacing.md,
-    marginTop: spacing.lg,
-    alignItems: 'center',
-  },
-  savingsLabel: {
-    fontSize: typography.caption,
-    color: colors.textSecondary,
-    marginBottom: spacing.xs,
-  },
-  savingsValue: {
-    fontSize: typography.title2,
-    fontWeight: typography.weights.bold,
-    color: colors.success,
-  },
-  sampleSection: {
-    marginBottom: spacing.lg,
-  },
-  sampleTitle: {
-    fontSize: typography.headline,
-    fontWeight: typography.weights.semibold,
-    color: colors.textPrimary,
-    marginBottom: spacing.md,
-  },
-  sampleTransaction: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: spacing.sm,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-  },
-  sampleMerchant: {
-    fontSize: typography.body,
-    color: colors.textPrimary,
-  },
-  sampleAmount: {
-    fontSize: typography.body,
-    fontWeight: typography.weights.semibold,
-    color: colors.textSecondary,
   },
 });

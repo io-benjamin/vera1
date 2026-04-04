@@ -14,9 +14,11 @@ import {
   LinkSuccess,
   create,
   open,
+  dismissLink,
 } from 'react-native-plaid-link-sdk';
+import { NativeModules } from 'react-native';
 import { useApp } from '../context/ProfileContext';
-import { getLinkToken, exchangeToken, getAccounts, removeAccount, syncTransactions, syncAccounts } from '../services/api';
+import { getLinkToken, exchangeToken, getAccounts, removeAccount, syncAccounts } from '../services/api';
 import { colors, typography, spacing, borderRadius, shadows } from '../theme';
 
 interface PlaidAccount {
@@ -34,12 +36,28 @@ const ConnectAccountsScreen = () => {
   const { refreshAccounts } = useApp();
   const [loading, setLoading] = useState(false);
   const [linking, setLinking] = useState(false);
-  const [syncing, setSyncing] = useState(false);
   const [accounts, setAccounts] = useState<PlaidAccount[]>([]);
+  const [linkToken, setLinkToken] = useState<string | null>(null);
 
   useEffect(() => {
     loadAccounts();
+    prefetchLinkToken();
   }, []);
+
+  // Pre-fetch and initialize Plaid on screen mount so the native singleton
+  // is always primed with a fresh token — prevents stale state from cached builds.
+  const prefetchLinkToken = async () => {
+    try {
+      dismissLink();
+      const tokenResponse = await getLinkToken();
+      if (tokenResponse.linkToken) {
+        setLinkToken(tokenResponse.linkToken);
+        create({ token: tokenResponse.linkToken });
+      }
+    } catch (error) {
+      console.log('Plaid prefetch skipped:', error);
+    }
+  };
 
   const loadAccounts = async () => {
     try {
@@ -75,91 +93,80 @@ const ConnectAccountsScreen = () => {
 
     try {
       console.log('Exchanging public token...');
-      // Exchange public token for access token on backend
       const exchangeResult = await exchangeToken(publicToken);
       console.log('Exchange result:', exchangeResult);
 
       Alert.alert(
         'Account Connected',
-        'Your bank account has been successfully connected!',
+        'Your bank account has been connected. Transactions will sync automatically.',
         [{ text: 'OK' }]
       );
 
-      // Refresh accounts list
-      console.log('Loading accounts...');
       await loadAccounts();
-
-      // Refresh app data
       await refreshAccounts();
     } catch (error: any) {
       console.error('Error exchanging token:', error);
       Alert.alert('Error', `Failed to connect account: ${error.message}`);
     } finally {
       setLinking(false);
+      setLinkToken(null); // Force fresh token next time
+      prefetchLinkToken(); // Pre-warm for next attempt
     }
   }, [refreshAccounts]);
 
-  const handlePlaidExit = useCallback((exit: LinkExit) => {
-    console.log('Plaid Link exit:', exit);
-    if (exit.error) {
-      console.error('Plaid Link error:', exit.error);
-      // Show error alert for connection issues
-      Alert.alert('Connection Error', exit.error.errorMessage || exit.error.displayMessage || 'An error occurred during bank connection');
-    }
-    setLinking(false);
-  }, []);
-
   const handleConnectBank = async () => {
     console.log('handleConnectBank called');
+    console.log('RNLinksdk native module available:', !!NativeModules.RNLinksdk);
+
     try {
       setLinking(true);
-      console.log('Fetching link token...');
-      // Get link token from backend
-      const tokenResponse = await getLinkToken();
-      console.log('Link token response:', tokenResponse);
 
-      if (tokenResponse.linkToken) {
-        console.log('Creating Plaid Link...');
-        // Create Plaid Link session
-        create({
-          token: tokenResponse.linkToken,
-        });
+      // Use prefetched token if available, otherwise fetch a new one
+      let token = linkToken;
+      if (!token) {
+        const tokenResponse = await getLinkToken();
+        token = tokenResponse.linkToken;
+      }
+      console.log('Link token:', token?.substring(0, 30) + '...');
 
-        // Track if Plaid Link callback was received
-        let callbackReceived = false;
-
-        // Open after a brief delay to ensure creation is complete
-        setTimeout(() => {
-          console.log('Opening Plaid Link...');
-          open({
-            onSuccess: (success) => {
-              callbackReceived = true;
-              handlePlaidSuccess(success);
-            },
-            onExit: (exit) => {
-              callbackReceived = true;
-              handlePlaidExit(exit);
-            },
-          });
-        }, 500);
-
-        // Safety timeout: if no callback received after 10 seconds, reset linking state
-        setTimeout(() => {
-          if (!callbackReceived) {
-            console.warn('Plaid Link did not respond - resetting linking state');
-            setLinking(false);
-            Alert.alert(
-              'Connection Issue',
-              'Plaid Link failed to open. Please try again. If the issue persists, try restarting the app.'
-            );
-          }
-        }, 10000);
-      } else {
+      if (!token) {
         Alert.alert('Error', 'Failed to initialize Plaid Link - no token returned');
         setLinking(false);
+        return;
       }
+
+      // Reset + reinitialize with fresh token, then open via onLoad
+      dismissLink();
+      create({
+        token,
+        onLoad: () => {
+          console.log('Plaid Link onLoad fired — opening now');
+          open({
+            onSuccess: (success) => {
+              console.log('Plaid onSuccess fired');
+              handlePlaidSuccess(success);
+            },
+            onExit: (exit: LinkExit) => {
+              console.log('Plaid onExit fired:', JSON.stringify(exit));
+              const hasPlaidError = !!exit.error && !!(exit.error.displayMessage || exit.error.errorMessage || exit.error.errorCode);
+              if (hasPlaidError) {
+                console.error('Plaid error:', exit.error.errorCode, exit.error.errorMessage);
+                Alert.alert(
+                  'Connection Error',
+                  `${exit.error.displayMessage || exit.error.errorMessage || 'An unknown error occurred.'}\n\nCode: ${exit.error.errorCode || 'UNKNOWN'}`
+                );
+              } else {
+                console.log('Plaid link exited without an actionable error; treating as user cancel/close.');
+              }
+              setLinking(false);
+              setLinkToken(null); // Force fresh token next time
+              prefetchLinkToken(); // Pre-warm for next attempt
+            },
+          });
+        },
+      });
     } catch (error: any) {
-      console.error('Error getting link token:', error);
+      console.error('Error in handleConnectBank:', error);
       Alert.alert('Error', `Failed to initialize Plaid Link: ${error.message || 'Unknown error'}`);
       setLinking(false);
     }
@@ -193,28 +200,6 @@ const ConnectAccountsScreen = () => {
         },
       ]
     );
-  };
-
-  const handleSyncTransactions = async () => {
-    if (accounts.length === 0) {
-      Alert.alert('No Accounts', 'Please connect a bank account first');
-      return;
-    }
-
-    try {
-      setSyncing(true);
-      const result = await syncTransactions(30);
-      Alert.alert(
-        'Sync Complete',
-        `Successfully synced ${result.transactionsSynced} transactions from the last 30 days`
-      );
-      await refreshAccounts();
-    } catch (error: any) {
-      console.error('Error syncing transactions:', error);
-      Alert.alert('Sync Failed', error.message || 'Failed to sync transactions');
-    } finally {
-      setSyncing(false);
-    }
   };
 
   const renderAccount = ({ item }: { item: PlaidAccount }) => (
@@ -321,17 +306,6 @@ const ConnectAccountsScreen = () => {
           <View style={styles.accountsSection}>
             <View style={styles.sectionHeader}>
               <Text style={styles.sectionTitle}>Connected Accounts ({accounts.length})</Text>
-              <TouchableOpacity
-                style={[styles.syncButton, syncing && styles.syncButtonDisabled]}
-                onPress={handleSyncTransactions}
-                disabled={syncing}
-              >
-                {syncing ? (
-                  <ActivityIndicator size="small" color={colors.accent} />
-                ) : (
-                  <Text style={styles.syncButtonText}>Sync Transactions</Text>
-                )}
-              </TouchableOpacity>
             </View>
             {accounts.map((account) => (
               <View key={account.id}>
@@ -461,20 +435,6 @@ const styles = StyleSheet.create({
     fontSize: typography.headline,
     fontWeight: typography.weights.semibold,
     color: colors.textPrimary,
-  },
-  syncButton: {
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    borderRadius: borderRadius.sm,
-    backgroundColor: colors.backgroundSecondary,
-  },
-  syncButtonDisabled: {
-    opacity: 0.6,
-  },
-  syncButtonText: {
-    fontSize: typography.caption,
-    fontWeight: typography.weights.medium,
-    color: colors.accent,
   },
   accountCard: {
     flexDirection: 'row',

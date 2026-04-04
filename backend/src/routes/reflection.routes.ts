@@ -25,29 +25,49 @@ export function createReflectionRoutes(pool: Pool): Router {
 
   /**
    * POST /api/reflections/:id/answer
-   * Submit an answer to a reflection question
+   * Submit an answer to a reflection question.
    *
-   * Body: { answer: string }
+   * Body: { answer: string, time_of_day?: 'morning'|'midday'|'evening'|'night' }
+   *
+   * When time_of_day is provided and the question is linked to a transaction,
+   * that transaction's user_time_of_day is updated (source=user, confidence=high).
    */
   router.post('/:id/answer', authMiddleware(pool), async (req: Request, res: Response) => {
     try {
       const userId = req.userId!;
       const { id } = req.params;
-      const { answer } = req.body;
+      const { answer, time_of_day } = req.body;
 
       if (!answer || typeof answer !== 'string' || answer.trim().length === 0) {
         return res.status(400).json({ message: 'answer is required' });
       }
 
-      const updated = await reflectionService.submitAnswer(userId, id, answer);
+      const VALID_TIMES = ['morning', 'midday', 'evening', 'night'] as const;
+      if (time_of_day !== undefined && !VALID_TIMES.includes(time_of_day)) {
+        return res.status(400).json({ message: 'time_of_day must be morning, midday, evening, or night' });
+      }
 
-      if (!updated) {
+      const { response, followUp, signatureMoment } = await reflectionService.submitAnswer(userId, id, answer);
+
+      if (!response) {
         return res.status(404).json({
           message: 'Question not found, already answered, or does not belong to you',
         });
       }
 
-      res.json({ response: updated });
+      // If a time label was provided and the question is linked to a transaction, persist it
+      if (time_of_day && response.transaction_id) {
+        await pool.query(
+          `UPDATE transactions
+           SET user_time_of_day = $1,
+               time_source      = 'user',
+               time_confidence  = 'high'
+           WHERE id = $2`,
+          [time_of_day, response.transaction_id]
+        );
+      }
+
+      res.json({ response, followUp, signatureMoment });
     } catch (error) {
       console.error('Error submitting answer:', error);
       res.status(500).json({ message: 'Failed to submit answer' });

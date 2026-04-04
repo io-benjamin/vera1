@@ -1,4 +1,4 @@
-import { Account, SpendingCheckup, Transaction, HabitsResponse, DetectedHabit, AIHabitInsight } from '../types';
+import { Account, Transaction, HabitsResponse, DetectedHabit, AIHabitInsight } from '../types';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export const API_BASE_URL = __DEV__
@@ -72,6 +72,13 @@ export const register = async (data: {
   const authData: AuthResponse = await response.json();
   await saveToken(authData.token);
   return authData;
+};
+
+export const getOAuthUrl = async (provider: 'AppleOAuth' | 'GoogleOAuth'): Promise<string> => {
+  const response = await fetch(`${API_BASE_URL}/auth/oauth/authorize?provider=${provider}`);
+  if (!response.ok) throw new Error('Failed to get OAuth URL');
+  const data = await response.json();
+  return data.url as string;
 };
 
 export const login = async (email: string, password: string): Promise<AuthResponse> => {
@@ -348,12 +355,12 @@ export const syncAccounts = async (): Promise<{ accountsSynced: number }> => {
 /**
  * Sync transactions for all linked Plaid items
  */
-export const syncTransactions = async (days?: number): Promise<{ transactionsSynced: number }> => {
+export const syncTransactions = async (force = false): Promise<{ transactionsSynced: number }> => {
   try {
     const response = await fetch(`${API_BASE_URL}/plaid/sync-transactions`, {
       method: 'POST',
       headers: await getAuthHeaders(),
-      body: JSON.stringify({ days: days || 30 }),
+      body: JSON.stringify({ force }),
     });
 
     if (!response.ok) {
@@ -452,6 +459,7 @@ export interface AccountTransaction {
   name: string;
   category?: string;
   is_pending: boolean;
+  user_time_of_day?: 'morning' | 'midday' | 'evening' | 'night' | null;
 }
 
 export interface AccountTransactionsResponse {
@@ -502,41 +510,14 @@ export const getAccountTransactions = async (
   }
 };
 
-/**
- * Get weekly spending checkup
- */
-export const getWeeklyCheckup = async (): Promise<SpendingCheckup | null> => {
-  try {
-    const response = await fetch(`${API_BASE_URL}/spending/weekly-checkup`, {
-      method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-    });
-
-    if (!response.ok) {
-      if (response.status === 404) {
-        return null; // No checkup data available
-      }
-      const errorData = await response.json().catch(() => ({ message: 'Unknown error' }));
-      throw new Error(errorData.message || `HTTP error! status: ${response.status}`);
-    }
-
-    const data = await response.json();
-    return data.checkup;
-  } catch (error) {
-    if (error instanceof Error) {
-      throw new Error(`Failed to get weekly checkup: ${error.message}`);
-    }
-    throw new Error('Failed to get weekly checkup: Unknown error');
-  }
-};
 
 /**
  * Get transactions by category
  */
 export const getTransactionsByCategory = async (category: string) => {
-  const response = await fetch(`${API_BASE_URL}/spending/category/${encodeURIComponent(category)}`);
+  const response = await fetch(`${API_BASE_URL}/spending/category/${encodeURIComponent(category)}`, {
+    headers: await getAuthHeaders(),
+  });
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({ message: 'Unknown error' }));
     throw new Error(errorData.message || 'Failed to fetch transactions');
@@ -617,6 +598,26 @@ export const acknowledgeHabit = async (habitId: string): Promise<void> => {
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
     throw new Error(errorData.error || `Failed to acknowledge habit: ${response.status}`);
+  }
+};
+
+/**
+ * Submit thumbs up/down feedback on an AI insight.
+ * insightId comes from ai_insights.id returned by the habits endpoint.
+ */
+export const submitInsightFeedback = async (
+  insightId: string,
+  isHelpful: boolean
+): Promise<void> => {
+  const response = await fetch(`${API_BASE_URL}/habits/insights/${insightId}/feedback`, {
+    method: 'POST',
+    headers: await getAuthHeaders(),
+    body: JSON.stringify({ is_helpful: isHelpful }),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({ message: 'Unknown error' }));
+    throw new Error(errorData.message || `Failed to submit feedback: ${response.status}`);
   }
 };
 
@@ -815,4 +816,128 @@ export const refreshAnalysis = async (): Promise<AnalysisResponse> => {
   }
 
   return await response.json();
+};
+
+// ============= Reflections API =============
+
+export interface UserResponse {
+  id: string;
+  user_id: string;
+  pattern_id: string | null;
+  transaction_id: string | null;
+  question: string;
+  answer: string | null;
+  response_type: string;
+  options: string[] | null;
+  answered_at: string | null;
+  created_at: string;
+  sample_transactions?: import('../types').TransactionEvidence[];
+}
+
+export const getReflectionHistory = async (limit = 30): Promise<UserResponse[]> => {
+  const response = await fetch(`${API_BASE_URL}/reflections/history?limit=${limit}`, {
+    method: 'GET',
+    headers: await getAuthHeaders(),
+  });
+  if (!response.ok) return [];
+  const data = await response.json();
+  return data.responses ?? [];
+};
+
+export const getPendingReflections = async (): Promise<UserResponse[]> => {
+  const response = await fetch(`${API_BASE_URL}/reflections/pending`, {
+    method: 'GET',
+    headers: await getAuthHeaders(),
+  });
+  if (!response.ok) return [];
+  const data = await response.json();
+  return data.questions ?? [];
+};
+
+export const submitReflectionAnswer = async (
+  id: string,
+  answer: string,
+  time_of_day?: string
+): Promise<{ response: UserResponse; followUp: UserResponse | null; signatureMoment: { callback: string; emoji: string } | null }> => {
+  const response = await fetch(`${API_BASE_URL}/reflections/${id}/answer`, {
+    method: 'POST',
+    headers: await getAuthHeaders(),
+    body: JSON.stringify({ answer, time_of_day }),
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ message: 'Failed to submit answer' }));
+    throw new Error(err.message);
+  }
+  return response.json();
+};
+
+// ============= Narrative Timeline =============
+
+export interface NarrativeUnit {
+  id: string;
+  date: string;
+  transaction: {
+    id: string;
+    merchant: string;
+    amount: number;
+    category: string;
+  };
+  pattern?: {
+    id: string;
+    title: string;
+    trend: 'increasing' | 'stable' | 'decreasing' | 'recovering';
+    state: 'Active' | 'New' | 'Increasing' | 'Stable';
+    confidence: 'low' | 'medium' | 'high';
+  };
+  context?: {
+    summary: string;
+    signals: string[];
+  };
+  continuity?: {
+    type: 'continuing' | 'new' | 'breaking';
+  };
+  time_context?: {
+    label: 'morning' | 'midday' | 'evening' | 'night';
+    source: 'user' | 'pending' | 'inferred';
+  };
+  reflection?: {
+    status: 'answered' | 'ask' | 'none';
+    answer?: string;
+    question?: string;
+    source_pattern_id?: string;
+  };
+}
+
+export const getNarrativeTimeline = async (limit = 50): Promise<NarrativeUnit[]> => {
+  const response = await fetch(`${API_BASE_URL}/timeline?limit=${limit}`, {
+    method: 'GET',
+    headers: await getAuthHeaders(),
+  });
+  if (!response.ok) return [];
+  const data = await response.json();
+  return data.units ?? [];
+};
+
+// ============= All-accounts transactions (for timeline) =============
+
+export const updateTransactionTime = async (
+  transactionId: string,
+  time_of_day: 'morning' | 'midday' | 'evening' | 'night'
+): Promise<void> => {
+  const response = await fetch(`${API_BASE_URL}/accounts/transactions/${transactionId}/time`, {
+    method: 'PATCH',
+    headers: await getAuthHeaders(),
+    body: JSON.stringify({ time_of_day }),
+  });
+  if (!response.ok) throw new Error('Failed to update transaction time');
+};
+
+export const getAllTransactions = async (days = 30): Promise<AccountTransaction[]> => {
+  const response = await fetch(`${API_BASE_URL}/spending/recent?days=${days}`, {
+    method: 'GET',
+    headers: await getAuthHeaders(),
+  });
+  if (!response.ok) return [];
+  const data = await response.json();
+  return data.transactions ?? [];
 };

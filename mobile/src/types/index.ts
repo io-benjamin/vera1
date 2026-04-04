@@ -53,26 +53,6 @@ export interface Transaction {
   is_pending: boolean;
 }
 
-/**
- * Weekly spending checkup summary
- */
-export interface SpendingCheckup {
-  week_start_date: string;
-  week_end_date: string;
-  total_spent: number;
-  transaction_count: number;
-  top_categories: {
-    category: TransactionCategory;
-    amount: number;
-    percentage: number;
-  }[];
-  daily_average: number;
-  insights: string[];
-  comparison_to_previous_week?: {
-    change_percentage: number;
-    change_amount: number;
-  };
-}
 
 /**
  * Monthly spending summary
@@ -103,6 +83,7 @@ export enum HabitType {
   BINGE_SHOPPING = 'BINGE_SHOPPING',
   MEAL_DELIVERY_HABIT = 'MEAL_DELIVERY_HABIT',
   CAFFEINE_RITUAL = 'CAFFEINE_RITUAL',
+  STRESS_SPENDING_DAY = 'STRESS_SPENDING_DAY',
 }
 
 /**
@@ -148,8 +129,12 @@ export interface DetectedHabit {
   sample_transactions: TransactionEvidence[];
   first_detected: string;
   last_occurrence: string;
-  trend: 'increasing' | 'stable' | 'decreasing' | null;
+  trend: 'increasing' | 'stable' | 'decreasing' | 'recovering' | null;
   is_acknowledged: boolean;
+  streak_count?: number;
+  streak_unit?: 'days' | 'weeks' | 'months' | null;
+  recovery_started_at?: string | null;
+  peak_monthly_impact?: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -158,13 +143,12 @@ export interface DetectedHabit {
  * AI-generated habit insight
  */
 export interface AIHabitInsight {
+  id?: string;          // set after saving to ai_insights table
   habit_type: HabitType;
-  psychological_trigger: string;
-  behavioral_pattern: string;
-  recommended_intervention: string;
-  difficulty_to_change: 'easy' | 'moderate' | 'hard';
-  potential_savings: number;
-  alternative_suggestions: string[];
+  insight: string;
+  pattern_summary: string;
+  confidence: 'low' | 'medium' | 'high';
+  reflection_question: string;
 }
 
 /**
@@ -180,7 +164,6 @@ export interface HabitSummary {
     occurrence_count: number;
   }[];
   insights: string[];
-  worst_time_window: TimeWindow | null;
   worst_day_of_week: number | null;
 }
 

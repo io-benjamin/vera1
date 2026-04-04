@@ -10,7 +10,7 @@ import {
   ActivityIndicator,
   Modal,
 } from 'react-native';
-import { getHabits, detectHabits, getHabitDetail, acknowledgeHabit } from '../services/api';
+import { getHabits, detectHabits, getHabitDetail, acknowledgeHabit, submitInsightFeedback } from '../services/api';
 import { DetectedHabit, AIHabitInsight, HabitSummary, HabitType } from '../types';
 import { colors, typography, spacing, borderRadius, shadows } from '../theme';
 
@@ -26,6 +26,7 @@ const HABIT_CONFIG: Record<HabitType, { emoji: string; color: string }> = {
   [HabitType.BINGE_SHOPPING]: { emoji: '🛒', color: '#EF4444' },
   [HabitType.MEAL_DELIVERY_HABIT]: { emoji: '🍔', color: '#84CC16' },
   [HabitType.CAFFEINE_RITUAL]: { emoji: '☕', color: '#78350F' },
+  [HabitType.STRESS_SPENDING_DAY]: { emoji: '😤', color: '#DC2626' },
 };
 
 const HabitsScreen = () => {
@@ -39,6 +40,7 @@ const HabitsScreen = () => {
   const [selectedHabit, setSelectedHabit] = useState<DetectedHabit | null>(null);
   const [selectedInsight, setSelectedInsight] = useState<AIHabitInsight | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [feedbackGiven, setFeedbackGiven] = useState<Record<string, boolean | null>>({});
 
   useEffect(() => {
     loadHabits();
@@ -120,16 +122,13 @@ const HabitsScreen = () => {
     });
   };
 
-  const getDifficultyColor = (difficulty: string) => {
-    switch (difficulty) {
-      case 'easy':
-        return colors.success;
-      case 'moderate':
-        return colors.warning;
-      case 'hard':
-        return colors.error;
-      default:
-        return colors.textSecondary;
+  const handleFeedback = async (insightId: string, isHelpful: boolean) => {
+    setFeedbackGiven(prev => ({ ...prev, [insightId]: isHelpful }));
+    try {
+      await submitInsightFeedback(insightId, isHelpful);
+    } catch {
+      // Revert on failure
+      setFeedbackGiven(prev => ({ ...prev, [insightId]: null }));
     }
   };
 
@@ -354,50 +353,38 @@ const HabitsScreen = () => {
                   </View>
                 ) : selectedInsight ? (
                   <View style={styles.aiInsightCard}>
-                    <Text style={styles.aiInsightTitle}>Why This Happens</Text>
-                    <Text style={styles.aiInsightTrigger}>
-                      {selectedInsight.psychological_trigger}
-                    </Text>
+                    <Text style={styles.aiInsightTitle}>What We Observed</Text>
+                    <Text style={styles.aiInsightText}>{selectedInsight.pattern_summary}</Text>
 
-                    <Text style={styles.aiInsightTitle}>The Pattern</Text>
-                    <Text style={styles.aiInsightText}>
-                      {selectedInsight.behavioral_pattern}
-                    </Text>
+                    <Text style={styles.aiInsightTitle}>Insight</Text>
+                    <Text style={styles.aiInsightText}>{selectedInsight.insight}</Text>
 
-                    <Text style={styles.aiInsightTitle}>What To Do</Text>
-                    <Text style={styles.aiInsightAction}>
-                      {selectedInsight.recommended_intervention}
-                    </Text>
+                    <Text style={styles.aiInsightTitle}>Something to Consider</Text>
+                    <Text style={styles.aiInsightReflection}>{selectedInsight.reflection_question}</Text>
 
-                    <View style={styles.difficultyRow}>
-                      <Text style={styles.difficultyLabel}>Difficulty to change:</Text>
-                      <Text
-                        style={[
-                          styles.difficultyValue,
-                          { color: getDifficultyColor(selectedInsight.difficulty_to_change) },
-                        ]}
-                      >
-                        {selectedInsight.difficulty_to_change.toUpperCase()}
-                      </Text>
-                    </View>
-
-                    {selectedInsight.alternative_suggestions.length > 0 && (
-                      <>
-                        <Text style={styles.aiInsightTitle}>Alternatives</Text>
-                        {selectedInsight.alternative_suggestions.map((alt, idx) => (
-                          <View key={idx} style={styles.alternativeItem}>
-                            <Text style={styles.alternativeBullet}>{idx + 1}.</Text>
-                            <Text style={styles.alternativeText}>{alt}</Text>
-                          </View>
-                        ))}
-                      </>
-                    )}
-
-                    <View style={styles.savingsCard}>
-                      <Text style={styles.savingsLabel}>Potential Monthly Savings</Text>
-                      <Text style={styles.savingsValue}>
-                        ${formatCurrency(selectedInsight.potential_savings)}
-                      </Text>
+                    {/* Feedback */}
+                    <View style={styles.feedbackRow}>
+                      <Text style={styles.feedbackLabel}>Was this helpful?</Text>
+                      {selectedInsight.id && feedbackGiven[selectedInsight.id] != null ? (
+                        <Text style={styles.feedbackThanks}>
+                          {feedbackGiven[selectedInsight.id] ? 'Thanks for the feedback 👍' : 'Got it, we\'ll improve 👎'}
+                        </Text>
+                      ) : (
+                        <View style={styles.feedbackButtons}>
+                          <TouchableOpacity
+                            style={styles.feedbackBtn}
+                            onPress={() => selectedInsight.id && handleFeedback(selectedInsight.id, true)}
+                          >
+                            <Text style={styles.feedbackBtnText}>👍</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={styles.feedbackBtn}
+                            onPress={() => selectedInsight.id && handleFeedback(selectedInsight.id, false)}
+                          >
+                            <Text style={styles.feedbackBtnText}>👎</Text>
+                          </TouchableOpacity>
+                        </View>
+                      )}
                     </View>
                   </View>
                 ) : null}

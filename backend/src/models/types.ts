@@ -102,6 +102,10 @@ export interface Statement {
   processed_at?: string;
 }
 
+export type TimeOfDay = 'morning' | 'midday' | 'evening' | 'night';
+export type TimeSource = 'user' | 'pending' | 'inferred';
+export type TimeConfidence = 'high' | 'medium' | 'low';
+
 /**
  * Transaction parsed from statement
  */
@@ -115,28 +119,16 @@ export interface Transaction {
   category?: TransactionCategory;
   merchant_name?: string;
   is_pending: boolean;
+  pending_captured_at?: Date | string | null;
+  // Time-of-day enrichment (migration 013)
+  user_time_of_day?: TimeOfDay | null;
+  inferred_time_of_day?: TimeOfDay | null;
+  time_source?: TimeSource | null;
+  time_confidence?: TimeConfidence | null;
+  time_reliability_score?: number | null;
+  first_seen_at?: Date | string | null;
 }
 
-/**
- * Weekly spending checkup summary
- */
-export interface SpendingCheckup {
-  week_start_date: string;
-  week_end_date: string;
-  total_spent: number;
-  transaction_count: number;
-  top_categories: {
-    category: TransactionCategory;
-    amount: number;
-    percentage: number;
-  }[];
-  daily_average: number;
-  insights: string[];
-  comparison_to_previous_week?: {
-    change_percentage: number;
-    change_amount: number;
-  };
-}
 
 /**
  * User account
@@ -388,7 +380,7 @@ export interface PatternHistoryContext {
   description: string;
   months_tracked: number;
   current_monthly_cost: number;
-  trend: 'improving' | 'worsening' | 'stable';
+  trend: 'improving' | 'worsening' | 'stable' | 'recovering';
   trend_percentage: number;
   best_month: { period: string; amount: number } | null;
   worst_month: { period: string; amount: number } | null;
@@ -614,6 +606,7 @@ export interface UserResponse {
   options: string[] | null; // for multiple_choice
   answered_at: string | null;
   created_at: string;
+  sample_transactions?: TransactionEvidence[];
 }
 
 /**
@@ -650,6 +643,11 @@ export enum HabitType {
   BINGE_SHOPPING = 'BINGE_SHOPPING',
   MEAL_DELIVERY_HABIT = 'MEAL_DELIVERY_HABIT',
   CAFFEINE_RITUAL = 'CAFFEINE_RITUAL',
+  STRESS_SPENDING_DAY = 'STRESS_SPENDING_DAY',
+  // Algorithmic pattern engines
+  RECURRING_SPEND = 'RECURRING_SPEND',
+  MERCHANT_DEPENDENCY = 'MERCHANT_DEPENDENCY',
+  ESCALATING_SPEND = 'ESCALATING_SPEND',
 }
 
 /**
@@ -684,8 +682,15 @@ export interface DetectedHabit {
   sample_transactions: TransactionEvidence[];
   first_detected: string;
   last_occurrence: string;
-  trend: 'increasing' | 'stable' | 'decreasing' | null;
+  trend: 'increasing' | 'stable' | 'decreasing' | 'recovering' | null;
   is_acknowledged: boolean;
+  data_quality_score?: number | null;
+  confidence_reason?: string | null;
+  streak_count?: number;
+  streak_unit?: 'days' | 'weeks' | 'months' | null;
+  streak_start?: string | null;
+  recovery_started_at?: string | null;
+  peak_monthly_impact?: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -719,7 +724,6 @@ export interface HabitSummary {
     occurrence_count: number;
   }[];
   insights: string[];
-  worst_time_window: TimeWindow | null;
   worst_day_of_week: number | null;
 }
 
@@ -728,12 +732,56 @@ export interface HabitSummary {
  */
 export interface AIHabitInsight {
   habit_type: HabitType;
-  psychological_trigger: string;
-  behavioral_pattern: string;
-  recommended_intervention: string;
-  difficulty_to_change: 'easy' | 'moderate' | 'hard';
-  potential_savings: number;
-  alternative_suggestions: string[];
+  insight: string;
+  pattern_summary: string;
+  confidence: 'low' | 'medium' | 'high';
+  reflection_question: string;
+}
+
+/**
+ * A single composed narrative unit in the behavioral timeline.
+ * One unit per transaction, enriched with pattern, context, continuity,
+ * time signal, and reflection — all pre-composed server-side.
+ */
+export interface NarrativeUnit {
+  id: string;          // transaction id
+  date: string;        // YYYY-MM-DD
+
+  transaction: {
+    id: string;
+    merchant: string;
+    amount: number;
+    category: string;
+  };
+
+  pattern?: {
+    id: string;
+    title: string;
+    trend: 'increasing' | 'stable' | 'decreasing' | 'recovering';
+    state: 'Active' | 'New' | 'Increasing' | 'Stable';
+    confidence: 'low' | 'medium' | 'high';
+  };
+
+  context?: {
+    summary: string;
+    signals: string[];
+  };
+
+  continuity?: {
+    type: 'continuing' | 'new' | 'breaking';
+  };
+
+  time_context?: {
+    label: 'morning' | 'midday' | 'evening' | 'night';
+    source: 'user' | 'pending' | 'inferred';
+  };
+
+  reflection?: {
+    status: 'answered' | 'ask' | 'none';
+    answer?: string;
+    question?: string;
+    source_pattern_id?: string;
+  };
 }
 
 /**

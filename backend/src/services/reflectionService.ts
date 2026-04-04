@@ -1,171 +1,11 @@
 import { Pool } from 'pg';
-import { UserResponse, ReflectionQuestion, ResponseType, DetectedHabit, HabitType } from '../models/types';
-
-/**
- * Builds context-aware reflection questions from real pattern data.
- * Questions reference the user's actual amounts, frequencies, and times —
- * not generic placeholders.
- */
-function buildContextualQuestions(habit: DetectedHabit): ReflectionQuestion[] {
-  const amount = `$${habit.avg_amount.toFixed(0)}`;
-  const monthly = `$${habit.monthly_impact.toFixed(0)}`;
-  const count = habit.occurrence_count;
-  const merchants = habit.trigger_conditions?.merchants?.slice(0, 2).join(' or ') ?? null;
-  const timeWindow = habit.trigger_conditions?.time_window?.label ?? null;
-
-  switch (habit.habit_type) {
-    case HabitType.LATE_NIGHT_SPENDING: {
-      const timeLabel = timeWindow ?? 'late at night';
-      const merchantHint = merchants ? ` at ${merchants}` : '';
-      return [
-        {
-          question: `You've made ${count} purchases${merchantHint} ${timeLabel}, averaging ${amount} each. What's usually going on for you at that time of night?`,
-          response_type: 'multiple_choice',
-          options: ['Winding down and bored', 'Stressed from the day', 'Just hungry or craving something', 'It feels like a reward', 'Not sure'],
-        },
-        {
-          question: `When you look back at those late-night purchases, how often do they feel worth it the next day?`,
-          response_type: 'multiple_choice',
-          options: ['Almost always', 'About half the time', 'Rarely', 'I usually forget about them'],
-        },
-      ];
-    }
-
-    case HabitType.WEEKEND_SPLURGE: {
-      return [
-        {
-          question: `Your weekend spending runs about ${monthly}/month — noticeably higher than weekdays. What shifts for you when the weekend starts?`,
-          response_type: 'multiple_choice',
-          options: ['I feel like I earned it', 'More social plans come up', 'My guard is down', 'I have more time to browse', 'Other'],
-        },
-        {
-          question: `How do you feel by Sunday evening after a heavier spending weekend?`,
-          response_type: 'multiple_choice',
-          options: ['Great — I enjoyed it', 'Neutral', 'Slightly off', 'Stressed about it', 'Depends on what I bought'],
-        },
-      ];
-    }
-
-    case HabitType.IMPULSE_PURCHASE: {
-      return [
-        {
-          question: `You've had ${count} purchases that looked unplanned, averaging ${amount}. What was happening right before one of those moments?`,
-          response_type: 'free_text',
-        },
-        {
-          question: `A day or two later, how do most of those impulse purchases feel?`,
-          response_type: 'multiple_choice',
-          options: ['Still glad I did it', 'Mixed — some yes, some no', 'Usually regret it', 'I rarely think about them again'],
-        },
-      ];
-    }
-
-    case HabitType.POST_PAYDAY_SURGE: {
-      return [
-        {
-          question: `Right after payday, your spending jumps — ${monthly}/month tied to this pattern. What does having money in your account feel like for you?`,
-          response_type: 'multiple_choice',
-          options: ['Relief — I can finally breathe', 'Excitement to treat myself', 'A chance to catch up on things I delayed', 'It just feels "available"', 'Other'],
-        },
-        {
-          question: `Before your paycheck hits, do you already have a plan for it?`,
-          response_type: 'multiple_choice',
-          options: ['Yes — I know exactly where it goes', 'Loosely — I have a rough idea', 'Not really', 'No, I figure it out as I go'],
-        },
-      ];
-    }
-
-    case HabitType.COMFORT_SPENDING: {
-      return [
-        {
-          question: `Some of your spending seems linked to emotional moments. What kinds of situations tend to send you toward buying something?`,
-          response_type: 'free_text',
-        },
-        {
-          question: `After a comfort purchase, does the feeling you were looking for actually show up?`,
-          response_type: 'multiple_choice',
-          options: ['Yes, temporarily', 'Yes, it genuinely helps', 'Sometimes', 'Not really', "I'm not sure why I bought it"],
-        },
-      ];
-    }
-
-    case HabitType.BINGE_SHOPPING: {
-      const merchantHint = merchants ? `often at ${merchants}` : '';
-      return [
-        {
-          question: `You've had ${count} sessions where multiple purchases happened close together${merchantHint ? ` — ${merchantHint}` : ''}. What usually kicks one of those sessions off?`,
-          response_type: 'multiple_choice',
-          options: ['Browsing an app or site', 'A sale or promotion', 'Feeling bored or restless', 'Stress or frustration', 'Following someone else\'s recommendation', 'Other'],
-        },
-        {
-          question: `Once you've made the first purchase in a session, what happens?`,
-          response_type: 'multiple_choice',
-          options: ['I keep going — feels like a green light', 'I usually stop after one', 'It depends on my mood', 'I set a limit and try to stick to it'],
-        },
-      ];
-    }
-
-    case HabitType.MEAL_DELIVERY_HABIT: {
-      const merchantHint = merchants ? `from ${merchants}` : '';
-      return [
-        {
-          question: `You order delivery${merchantHint ? ` ${merchantHint}` : ''} about ${count} times with an average of ${amount} per order. What's usually the deciding factor — cooking vs. ordering?`,
-          response_type: 'multiple_choice',
-          options: ['Too tired after work', 'Nothing easy at home', 'Ordering is just faster', 'It\'s a treat I look forward to', 'Social pressure or habit', 'Other'],
-        },
-        {
-          question: `If delivery wasn't an option for one week, what do you think would realistically happen?`,
-          response_type: 'multiple_choice',
-          options: ['I\'d cook more — it\'s doable', 'I\'d find another workaround', 'I\'d struggle honestly', 'I\'d plan better in advance'],
-        },
-      ];
-    }
-
-    case HabitType.CAFFEINE_RITUAL: {
-      const merchantHint = merchants ? ` at ${merchants}` : '';
-      return [
-        {
-          question: `Your coffee shop visits${merchantHint} happen ${count} times, averaging ${amount}. Beyond the coffee itself, what does that visit give you?`,
-          response_type: 'multiple_choice',
-          options: ['A reliable daily anchor', 'A break from whatever I\'m doing', 'Social connection', 'A productivity signal', 'Honestly just the coffee'],
-        },
-      ];
-    }
-
-    case HabitType.WEEKLY_RITUAL: {
-      const merchantHint = merchants ? ` at ${merchants}` : '';
-      return [
-        {
-          question: `You have a consistent weekly pattern${merchantHint}, averaging ${amount}. How important is this routine to you?`,
-          response_type: 'multiple_choice',
-          options: ['Very — it\'s something I look forward to', 'Moderately important', 'Somewhat automatic honestly', 'I\'d be fine skipping it'],
-        },
-      ];
-    }
-
-    case HabitType.RECURRING_INDULGENCE: {
-      return [
-        {
-          question: `This pattern has shown up ${count} times totaling ${monthly}/month. Does it still feel like a deliberate choice, or has it become automatic?`,
-          response_type: 'multiple_choice',
-          options: ['Definitely a conscious choice I make', 'Somewhere in between', 'Mostly automatic', 'I\'m not sure'],
-        },
-        {
-          question: `If you cut this back by half, what would you actually miss?`,
-          response_type: 'free_text',
-        },
-      ];
-    }
-
-    default:
-      return [
-        {
-          question: `This pattern has come up ${count} times, averaging ${amount}. What do you think is driving it?`,
-          response_type: 'free_text',
-        },
-      ];
-  }
-}
+import { UserResponse, ResponseType, DetectedHabit } from '../models/types';
+import {
+  getInitialQuestions,
+  getFollowUpQuestion,
+  getDeepReflectionQuestion,
+  getCrossPatternQuestion,
+} from './reflectionQuestionTemplates';
 
 export class ReflectionService {
   private pool: Pool;
@@ -175,8 +15,8 @@ export class ReflectionService {
   }
 
   /**
-   * Generate and store context-aware reflection questions for a detected habit.
-   * Skips creation if unanswered questions already exist for this pattern.
+   * Generate and store Tier 1 (initial) questions for a detected habit.
+   * Skips if unanswered questions already exist for this pattern.
    */
   async generateQuestionsForHabit(
     userId: string,
@@ -193,7 +33,7 @@ export class ReflectionService {
       return this.getPendingQuestionsForPattern(userId, patternId);
     }
 
-    const questions = buildContextualQuestions(habit);
+    const questions = getInitialQuestions(habit);
     const created: UserResponse[] = [];
 
     for (const q of questions) {
@@ -217,22 +57,168 @@ export class ReflectionService {
   }
 
   /**
-   * Submit an answer for a specific response.
+   * Submit an answer and automatically generate a Tier 2 follow-up question
+   * if one applies to the user's response. Returns both the saved answer
+   * and any new follow-up question created.
    */
   async submitAnswer(
     userId: string,
     responseId: string,
     answer: string
-  ): Promise<UserResponse | null> {
+  ): Promise<{ response: UserResponse | null; followUp: UserResponse | null; signatureMoment: { callback: string; emoji: string } | null }> {
     const result = await this.pool.query(
       `UPDATE user_responses
        SET answer = $1, answered_at = CURRENT_TIMESTAMP
        WHERE id = $2 AND user_id = $3 AND answered_at IS NULL
-       RETURNING *`,
+       RETURNING *, pattern_id`,
       [answer.trim(), responseId, userId]
     );
 
-    if (result.rows.length === 0) return null;
+    if (result.rows.length === 0) return { response: null, followUp: null, signatureMoment: null };
+
+    const saved = this.mapRow(result.rows[0]);
+    const patternId = result.rows[0].pattern_id;
+
+    // Attempt to generate a follow-up if this pattern has a habit type
+    let followUp: UserResponse | null = null;
+    if (patternId) {
+      followUp = await this.generateFollowUpQuestion(userId, patternId, answer);
+    }
+
+    // Generate signature moment for continuity
+    const signatureMoment = await this.generateSignatureMoment(userId, answer, saved.question);
+
+    return { response: saved, followUp, signatureMoment };
+  }
+
+  /**
+   * Generate a Tier 2 follow-up question based on the user's answer.
+   * Only creates one if the answer triggers a meaningful follow-up
+   * and no unanswered follow-ups already exist for this pattern.
+   */
+  async generateFollowUpQuestion(
+    userId: string,
+    patternId: string,
+    previousAnswer: string
+  ): Promise<UserResponse | null> {
+    // Don't stack follow-ups — skip if unanswered questions already exist
+    const pending = await this.pool.query(
+      `SELECT id FROM user_responses
+       WHERE user_id = $1 AND pattern_id = $2 AND answered_at IS NULL`,
+      [userId, patternId]
+    );
+    if (pending.rows.length > 0) return null;
+
+    // Get the habit type for this pattern
+    const habitResult = await this.pool.query(
+      `SELECT habit_type FROM detected_habits WHERE id = $1`,
+      [patternId]
+    );
+    if (habitResult.rows.length === 0) return null;
+
+    const habitType = habitResult.rows[0].habit_type;
+    const followUpQ = getFollowUpQuestion(habitType, previousAnswer);
+    if (!followUpQ) return null;
+
+    const result = await this.pool.query(
+      `INSERT INTO user_responses
+         (user_id, pattern_id, question, response_type, options)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING *`,
+      [
+        userId,
+        patternId,
+        followUpQ.question,
+        followUpQ.response_type,
+        followUpQ.options ? JSON.stringify(followUpQ.options) : null,
+      ]
+    );
+
+    return this.mapRow(result.rows[0]);
+  }
+
+  /**
+   * Generate a Tier 3 deep reflection question for a persistent or high-impact habit.
+   * Only fires when the pattern qualifies (high monthly impact or high frequency)
+   * and the user has already answered at least one question for this pattern.
+   */
+  async generateDeepReflectionQuestion(
+    userId: string,
+    patternId: string,
+    habit: DetectedHabit
+  ): Promise<UserResponse | null> {
+    const deepQ = getDeepReflectionQuestion(habit);
+    if (!deepQ) return null;
+
+    // Only offer deep question if user has engaged (answered at least 1 question)
+    const answered = await this.pool.query(
+      `SELECT id FROM user_responses
+       WHERE user_id = $1 AND pattern_id = $2 AND answered_at IS NOT NULL
+       LIMIT 1`,
+      [userId, patternId]
+    );
+    if (answered.rows.length === 0) return null;
+
+    // Don't duplicate — skip if this exact question already exists
+    const duplicate = await this.pool.query(
+      `SELECT id FROM user_responses
+       WHERE user_id = $1 AND pattern_id = $2 AND question = $3`,
+      [userId, patternId, deepQ.question]
+    );
+    if (duplicate.rows.length > 0) return null;
+
+    const result = await this.pool.query(
+      `INSERT INTO user_responses
+         (user_id, pattern_id, question, response_type, options)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING *`,
+      [
+        userId,
+        patternId,
+        deepQ.question,
+        deepQ.response_type,
+        deepQ.options ? JSON.stringify(deepQ.options) : null,
+      ]
+    );
+
+    return this.mapRow(result.rows[0]);
+  }
+
+  /**
+   * Generate a cross-pattern question when two or more related habits coexist.
+   * Stored without a specific pattern_id since it spans multiple patterns.
+   * Only fires once per combination (deduped by question text).
+   */
+  async generateCrossPatternQuestion(
+    userId: string,
+    habits: DetectedHabit[]
+  ): Promise<UserResponse | null> {
+    if (habits.length < 2) return null;
+
+    const crossQ = getCrossPatternQuestion(habits);
+    if (!crossQ) return null;
+
+    // Dedupe by question text
+    const duplicate = await this.pool.query(
+      `SELECT id FROM user_responses
+       WHERE user_id = $1 AND question = $2`,
+      [userId, crossQ.question]
+    );
+    if (duplicate.rows.length > 0) return null;
+
+    const result = await this.pool.query(
+      `INSERT INTO user_responses
+         (user_id, pattern_id, question, response_type, options)
+       VALUES ($1, NULL, $2, $3, $4)
+       RETURNING *`,
+      [
+        userId,
+        crossQ.question,
+        crossQ.response_type,
+        crossQ.options ? JSON.stringify(crossQ.options) : null,
+      ]
+    );
+
     return this.mapRow(result.rows[0]);
   }
 
@@ -241,7 +227,7 @@ export class ReflectionService {
    */
   async getPendingQuestions(userId: string): Promise<UserResponse[]> {
     const result = await this.pool.query(
-      `SELECT r.*, h.title as pattern_title, h.habit_type
+      `SELECT r.*, h.title as pattern_title, h.habit_type, h.sample_transactions as habit_sample_transactions
        FROM user_responses r
        LEFT JOIN detected_habits h ON r.pattern_id = h.id
        WHERE r.user_id = $1 AND r.answered_at IS NULL
@@ -298,6 +284,102 @@ export class ReflectionService {
   }
 
   /**
+   * Generate a signature moment - a memorable callback to previous user responses
+   * that creates continuity across time. Returns null if no suitable callback found.
+   */
+  async generateSignatureMoment(
+    userId: string,
+    currentAnswer: string,
+    currentQuestion: string
+  ): Promise<{ callback: string; emoji: string } | null> {
+    // Get recent answered responses to find patterns
+    const recentResponses = await this.getAnsweredResponses(userId, 10);
+
+    if (recentResponses.length < 2) return null; // Need some history for continuity
+
+    // Look for thematic connections in answers
+    const callbacks = [];
+
+    // Check for repeated themes or similar answers
+    for (const prevResponse of recentResponses) {
+      if (!prevResponse.answer) continue;
+
+      const prevAnswer = prevResponse.answer.toLowerCase();
+      const currAnswer = currentAnswer.toLowerCase();
+
+      // Look for similar emotional states or situations
+      if (this.answersAreThematicallySimilar(prevAnswer, currAnswer)) {
+        const timeAgo = this.getTimeAgo(prevResponse.answered_at!);
+        callbacks.push({
+          callback: `You mentioned "${prevResponse.answer}" ${timeAgo} in a similar situation.`,
+          emoji: '🔄'
+        });
+      }
+
+      // Look for repeated motivations or triggers
+      if (this.answersShareMotivation(prevAnswer, currAnswer)) {
+        callbacks.push({
+          callback: `You said "${prevResponse.answer}" before when explaining your reasons.`,
+          emoji: '💭'
+        });
+      }
+    }
+
+    // Return the most recent/relevant callback
+    return callbacks.length > 0 ? callbacks[0] : null;
+  }
+
+  private answersAreThematicallySimilar(prev: string, curr: string): boolean {
+    const themes = [
+      ['bored', 'unoccupied', 'nothing to do'],
+      ['stressed', 'overwhelmed', 'anxious'],
+      ['treating myself', 'reward', 'earned it'],
+      ['convenience', 'easy', 'quick'],
+      ['hungry', 'craving', 'snack'],
+      ['social', 'friends', 'group'],
+      ['tired', 'exhausted', 'drained'],
+      ['celebrating', 'special occasion', 'milestone']
+    ];
+
+    for (const theme of themes) {
+      const prevMatches = theme.some(word => prev.includes(word));
+      const currMatches = theme.some(word => curr.includes(word));
+      if (prevMatches && currMatches) return true;
+    }
+    return false;
+  }
+
+  private answersShareMotivation(prev: string, curr: string): boolean {
+    const motivations = [
+      ['relief', 'escape', 'break'],
+      ['comfort', 'familiar', 'safe'],
+      ['excitement', 'fun', 'enjoyment'],
+      ['necessity', 'need', 'required'],
+      ['habit', 'routine', 'automatic']
+    ];
+
+    for (const motivation of motivations) {
+      const prevMatches = motivation.some(word => prev.includes(word));
+      const currMatches = motivation.some(word => curr.includes(word));
+      if (prevMatches && currMatches) return true;
+    }
+    return false;
+  }
+
+  private getTimeAgo(answeredAt: string): string {
+    const now = new Date();
+    const answered = new Date(answeredAt);
+    const diffMs = now.getTime() - answered.getTime();
+    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+    if (diffDays === 0) return 'earlier today';
+    if (diffDays === 1) return 'yesterday';
+    if (diffDays < 7) return `${diffDays} days ago`;
+    if (diffDays < 30) return `${Math.floor(diffDays / 7)} weeks ago`;
+    return 'a while ago';
+  }
+
+  /**
    * Build a plain-text summary of user responses for inclusion in AI prompts.
    * Groups by pattern and formats as Q&A pairs.
    */
@@ -308,7 +390,6 @@ export class ReflectionService {
       return 'No user reflections available yet.';
     }
 
-    // Group by pattern
     const byPattern = new Map<string, typeof responses>();
     for (const r of responses) {
       const key = (r as any).pattern_title ?? 'General';
@@ -338,6 +419,7 @@ export class ReflectionService {
       options: row.options ?? null,
       answered_at: row.answered_at ? new Date(row.answered_at).toISOString() : null,
       created_at: new Date(row.created_at).toISOString(),
+      sample_transactions: row.habit_sample_transactions ?? undefined,
     };
   }
 }

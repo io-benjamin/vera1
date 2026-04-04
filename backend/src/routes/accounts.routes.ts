@@ -213,20 +213,35 @@ router.delete('/:accountId', authMiddleware(pool), async (req: Request, res: Res
     const userId = req.userId!;
     const { accountId } = req.params;
 
-    const result = await pool.query(
-      'DELETE FROM accounts WHERE id = $1 AND user_id = $2 RETURNING id',
+    // Look up the account and its plaid_item_id
+    const accountResult = await pool.query(
+      'SELECT id, plaid_item_id FROM accounts WHERE id = $1 AND user_id = $2',
       [accountId, userId]
     );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        message: 'Account not found',
-      });
+    if (accountResult.rows.length === 0) {
+      return res.status(404).json({ message: 'Account not found' });
     }
 
-    res.json({
-      message: 'Account deleted successfully',
-    });
+    const { plaid_item_id } = accountResult.rows[0];
+
+    if (plaid_item_id) {
+      // Delete the entire plaid_item — this cascades to ALL accounts under
+      // that institution and their transactions, and stops future syncs from
+      // re-inserting the deleted account.
+      await pool.query(
+        'DELETE FROM plaid_items WHERE item_id = $1 AND user_id = $2',
+        [plaid_item_id, userId]
+      );
+    } else {
+      // Manual account (no Plaid link) — delete just this row
+      await pool.query(
+        'DELETE FROM accounts WHERE id = $1 AND user_id = $2',
+        [accountId, userId]
+      );
+    }
+
+    res.json({ message: 'Account disconnected successfully' });
   } catch (error) {
     console.error('Error deleting account:', error);
     res.status(500).json({
@@ -245,7 +260,7 @@ router.get('/:accountId/transactions', authMiddleware(pool), async (req: Request
     const userId = req.userId!;
     const { accountId } = req.params;
     const page = parseInt(req.query.page as string) || 1;
-    const limit = parseInt(req.query.limit as string) || 50;
+    const limit = Math.min(parseInt(req.query.limit as string) || 100, 500);
     const offset = (page - 1) * limit;
 
     // Verify ownership
@@ -269,7 +284,7 @@ router.get('/:accountId/transactions', authMiddleware(pool), async (req: Request
 
     // Get transactions
     const result = await pool.query(
-      `SELECT id, account_id, amount, date, name, category, merchant_name, is_pending
+      `SELECT id, account_id, amount, date, name, category, merchant_name, is_pending, user_time_of_day
        FROM transactions
        WHERE account_id = $1
        ORDER BY date DESC, created_at DESC
@@ -281,10 +296,13 @@ router.get('/:accountId/transactions', authMiddleware(pool), async (req: Request
       id: row.id,
       account_id: row.account_id,
       amount: parseFloat(row.amount),
-      date: row.date,
+      date: row.date instanceof Date
+        ? row.date.toISOString().split('T')[0]
+        : String(row.date).split('T')[0],
       name: cleanMerchantName(row.name, row.merchant_name),
       category: row.category,
       is_pending: row.is_pending,
+      user_time_of_day: row.user_time_of_day ?? null,
     }));
 
     res.json({
@@ -309,6 +327,43 @@ router.get('/:accountId/transactions', authMiddleware(pool), async (req: Request
       message: 'Failed to get transactions',
       error: error instanceof Error ? error.message : 'Unknown error',
     });
+  }
+});
+
+// PATCH /transactions/:transactionId/time — user labels a transaction's time-of-day
+router.patch('/transactions/:transactionId/time', authMiddleware(pool), async (req: Request, res: Response) => {
+  const { transactionId } = req.params;
+  const userId = req.userId!;
+  const { time_of_day } = req.body;
+
+  const VALID = ['morning', 'midday', 'evening', 'night'];
+  if (!time_of_day || !VALID.includes(time_of_day)) {
+    return res.status(400).json({ message: 'time_of_day must be morning, midday, evening, or night' });
+  }
+
+  try {
+    // Make sure transaction belongs to this user via account owner check.
+    const ownerCheck = await pool.query(
+      `SELECT t.id
+       FROM transactions t
+       JOIN accounts a ON t.account_id = a.id
+       WHERE t.id = $1 AND a.user_id = $2`,
+      [transactionId, userId]
+    );
+    if (ownerCheck.rows.length === 0) {
+      return res.status(404).json({ message: 'Transaction not found' });
+    }
+
+    await pool.query(
+      `UPDATE transactions
+       SET user_time_of_day = $1, time_source = 'user', time_confidence = 'high'
+       WHERE id = $2`,
+      [time_of_day, transactionId]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error updating transaction time:', error);
+    res.status(500).json({ message: 'Failed to update transaction time' });
   }
 });
 

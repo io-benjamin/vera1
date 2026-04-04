@@ -1,6 +1,7 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { Pool } from 'pg';
+import { WorkOS } from '@workos-inc/node';
 import { User, AuthRequest, AuthResponse } from '../models/types';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
@@ -8,9 +9,50 @@ const JWT_EXPIRES_IN = '7d';
 
 export class AuthService {
   private pool: Pool;
+  private workos: WorkOS;
 
   constructor(pool: Pool) {
     this.pool = pool;
+    this.workos = new WorkOS(process.env.WORKOS_API_KEY!);
+  }
+
+  /**
+   * Get WorkOS authorization URL for a given provider.
+   * provider: 'AppleOAuth' | 'GoogleOAuth'
+   */
+  getOAuthUrl(provider: 'AppleOAuth' | 'GoogleOAuth'): string {
+    return this.workos.userManagement.getAuthorizationUrl({
+      provider,
+      clientId: process.env.WORKOS_CLIENT_ID!,
+      redirectUri: process.env.WORKOS_REDIRECT_URI!,
+    });
+  }
+
+  /**
+   * Exchange a WorkOS auth code for a local JWT.
+   * Upserts a user row keyed on workos_user_id.
+   */
+  async findOrCreateWorkOSUser(code: string): Promise<AuthResponse> {
+    const { user: wu } = await this.workos.userManagement.authenticateWithCode({
+      code,
+      clientId: process.env.WORKOS_CLIENT_ID!,
+    });
+
+    const result = await this.pool.query(
+      `INSERT INTO users (email, first_name, last_name, workos_user_id, preferred_language)
+       VALUES ($1, $2, $3, $4, 'en')
+       ON CONFLICT (workos_user_id) DO UPDATE
+         SET email      = EXCLUDED.email,
+             first_name = COALESCE(EXCLUDED.first_name, users.first_name),
+             last_name  = COALESCE(EXCLUDED.last_name,  users.last_name),
+             updated_at = CURRENT_TIMESTAMP
+       RETURNING id, email, first_name, last_name, phone, preferred_language, created_at, updated_at`,
+      [wu.email, wu.firstName ?? null, wu.lastName ?? null, wu.id]
+    );
+
+    const user: User = result.rows[0];
+    const token = this.generateToken(user.id);
+    return { token, user };
   }
 
   /**

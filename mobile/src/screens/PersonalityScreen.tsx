@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import * as api from '../services/api';
 import { colors, typography, spacing, borderRadius, shadows } from '../theme';
+import { FadeInView } from '../components/FadeInView';
 
 export default function PersonalityScreen() {
   const [personality, setPersonality] = useState<api.PersonalityResponse | null>(null);
@@ -123,69 +124,81 @@ export default function PersonalityScreen() {
         showsVerticalScrollIndicator={false}
       >
         {/* Personality Header */}
-        <View style={styles.header}>
-          <Text style={styles.emoji}>{personality.message.emoji}</Text>
-          <Text style={styles.title}>{personality.message.title}</Text>
-          <Text style={styles.description}>{personality.message.description}</Text>
-        </View>
+        <FadeInView index={0}>
+          <View style={styles.header}>
+            <Text style={styles.emoji}>{personality.message.emoji}</Text>
+            <Text style={styles.title}>{personality.message.title}</Text>
+            <Text style={styles.description}>{personality.message.description}</Text>
+          </View>
+        </FadeInView>
 
         {/* Stats Cards */}
-        <View style={styles.statsRow}>
-          <View style={styles.statCard}>
-            <Text style={styles.statLabel}>Impact</Text>
-            <Text style={styles.statValue}>
-              {formatMoney(personality.personality.damage_score)}
-            </Text>
-            <Text style={styles.statSubtext}>potential savings</Text>
+        <FadeInView index={1}>
+          <View style={styles.statsRow}>
+            <View style={styles.statCard}>
+              <Text style={styles.statLabel}>Impact</Text>
+              <Text style={styles.statValue}>
+                {formatMoney(personality.personality.damage_score)}
+              </Text>
+              <Text style={styles.statSubtext}>potential savings</Text>
+            </View>
+            <View style={styles.statCard}>
+              <Text style={styles.statLabel}>Confidence</Text>
+              <Text style={styles.statValue}>
+                {personality.personality.confidence_score.toFixed(0)}%
+              </Text>
+              <Text style={styles.statSubtext}>pattern match</Text>
+            </View>
           </View>
-          <View style={styles.statCard}>
-            <Text style={styles.statLabel}>Confidence</Text>
-            <Text style={styles.statValue}>
-              {personality.personality.confidence_score.toFixed(0)}%
-            </Text>
-            <Text style={styles.statSubtext}>pattern match</Text>
-          </View>
-        </View>
+        </FadeInView>
 
         {/* Secondary Trait */}
         {personality.personality.secondary_type && (
-          <View style={styles.secondaryCard}>
-            <Text style={styles.secondaryLabel}>Secondary Trait</Text>
-            <Text style={styles.secondaryValue}>
-              {personality.personality.secondary_type.replace(/_/g, ' ')}
-            </Text>
-          </View>
+          <FadeInView index={2}>
+            <View style={styles.secondaryCard}>
+              <Text style={styles.secondaryLabel}>Secondary Trait</Text>
+              <Text style={styles.secondaryValue}>
+                {personality.personality.secondary_type.replace(/_/g, ' ')}
+              </Text>
+            </View>
+          </FadeInView>
         )}
 
         {/* Action Steps */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Recommended Actions</Text>
-          <View style={styles.actionsList}>
-            {personality.actions.map((action, index) => (
-              <View key={index} style={styles.actionItem}>
-                <View style={styles.actionNumber}>
-                  <Text style={styles.actionNumberText}>{index + 1}</Text>
+        <FadeInView index={3}>
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Recommended Actions</Text>
+            <View style={styles.actionsList}>
+              {personality.actions.map((action, index) => (
+                <View key={index} style={styles.actionItem}>
+                  <View style={styles.actionNumber}>
+                    <Text style={styles.actionNumberText}>{index + 1}</Text>
+                  </View>
+                  <Text style={styles.actionText}>{action}</Text>
                 </View>
-                <Text style={styles.actionText}>{action}</Text>
-              </View>
-            ))}
+              ))}
+            </View>
           </View>
-        </View>
+        </FadeInView>
 
         {/* Re-analyze Button */}
-        <TouchableOpacity
-          style={styles.reanalyzeButton}
-          onPress={handleReanalyze}
-          activeOpacity={0.8}
-        >
-          <Text style={styles.reanalyzeButtonText}>Run New Analysis</Text>
-        </TouchableOpacity>
+        <FadeInView index={4}>
+          <TouchableOpacity
+            style={styles.reanalyzeButton}
+            onPress={handleReanalyze}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.reanalyzeButtonText}>Run New Analysis</Text>
+          </TouchableOpacity>
+        </FadeInView>
 
         {/* Footnote */}
-        <Text style={styles.footnote}>
-          Based on data from {personality.personality.analysis_period_start} to{' '}
-          {personality.personality.analysis_period_end}
-        </Text>
+        <FadeInView index={5}>
+          <Text style={styles.footnote}>
+            Based on data from {personality.personality.analysis_period_start} to{' '}
+            {personality.personality.analysis_period_end}
+          </Text>
+        </FadeInView>
 
         <View style={styles.bottomSpacer} />
       </ScrollView>

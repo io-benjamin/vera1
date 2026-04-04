@@ -6,6 +6,7 @@ import {
   CountryCode,
 } from 'plaid';
 import { Pool } from 'pg';
+import { DataQualityService } from './dataQualityService';
 
 // Initialize Plaid client
 const configuration = new Configuration({
@@ -32,15 +33,18 @@ export async function createLinkToken(pool: Pool, userId: string): Promise<strin
     products: [Products.Transactions],
     country_codes: [CountryCode.Us],
     language: 'en',
-    webhook: process.env.PLAID_WEBHOOK_URL,
+    ...(process.env.PLAID_WEBHOOK_URL && { webhook: process.env.PLAID_WEBHOOK_URL }),
+    ...(process.env.PLAID_REDIRECT_URI && { redirect_uri: process.env.PLAID_REDIRECT_URI }),
   };
 
   try {
+    console.log('Creating link token with redirect_uri:', process.env.PLAID_REDIRECT_URI ?? '(none)');
     const response = await plaidClient.linkTokenCreate(request);
     return response.data.link_token;
-  } catch (error) {
-    console.error('Error creating link token:', error);
-    throw error;
+  } catch (error: any) {
+    const plaidError = error?.response?.data;
+    console.error('Error creating link token:', plaidError ?? error);
+    throw new Error(plaidError?.error_message ?? 'Failed to create link token');
   }
 }
 
@@ -64,6 +68,12 @@ export async function exchangePublicToken(
     // The actual institution info can be fetched from accounts
     const institutionName = 'Bank Account';
     const institutionId = 'unknown';
+
+    // Validate user exists before writing plaid item (avoids FK violation)
+    const userResult = await pool.query('SELECT id FROM users WHERE id = $1', [userId]);
+    if (userResult.rows.length === 0) {
+      throw new Error(`User not found: ${userId}. Create user before linking Plaid.`);
+    }
 
     // Save to database
     await pool.query(
@@ -151,12 +161,12 @@ export async function syncTransactions(
   pool: Pool,
   userId: string,
   itemId: string,
-  days: number = 30
 ): Promise<number> {
+  const dqService = new DataQualityService(pool);
+
   try {
-    // Get access token
     const itemResult = await pool.query(
-      'SELECT access_token FROM plaid_items WHERE item_id = $1 AND user_id = $2',
+      'SELECT access_token, transactions_cursor FROM plaid_items WHERE item_id = $1 AND user_id = $2',
       [itemId, userId]
     );
 
@@ -164,41 +174,9 @@ export async function syncTransactions(
       throw new Error('Plaid item not found');
     }
 
-    const accessToken = itemResult.rows[0].access_token;
+    const { access_token: accessToken, transactions_cursor: savedCursor } = itemResult.rows[0];
 
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - days);
-    const endDate = new Date();
-
-    const request = {
-      access_token: accessToken,
-      start_date: startDate.toISOString().split('T')[0],
-      end_date: endDate.toISOString().split('T')[0],
-      options: {
-        count: 500,
-        offset: 0,
-      },
-    };
-
-    let allTransactions: any[] = [];
-    let totalTransactions = 0;
-    let hasMore = true;
-
-    // Paginate through all transactions
-    while (hasMore) {
-      const response = await plaidClient.transactionsGet(request);
-      const transactions = response.data.transactions;
-      allTransactions = allTransactions.concat(transactions);
-      totalTransactions = response.data.total_transactions;
-
-      if (allTransactions.length >= totalTransactions) {
-        hasMore = false;
-      } else {
-        request.options!.offset = allTransactions.length;
-      }
-    }
-
-    // Get account mappings
+    // Get account mappings up front
     const accountsResult = await pool.query(
       'SELECT id, plaid_account_id FROM accounts WHERE plaid_item_id = $1',
       [itemId]
@@ -206,43 +184,136 @@ export async function syncTransactions(
     const accountMap = new Map(
       accountsResult.rows.map((row) => [row.plaid_account_id, row.id])
     );
+    console.log(`Account map has ${accountMap.size} accounts for item ${itemId}`);
 
-    // Insert transactions
+    let cursor: string | undefined = savedCursor ?? undefined;
+    let added: any[] = [];
+    let modified: any[] = [];
+    let removed: any[] = [];
+    let hasMore = true;
+
+    // Paginate through all changes since last cursor
+    while (hasMore) {
+      const response = await plaidClient.transactionsSync({
+        access_token: accessToken,
+        cursor,
+        count: 500,
+        options: { include_personal_finance_category: true },
+      });
+
+      added = added.concat(response.data.added);
+      modified = modified.concat(response.data.modified);
+      removed = removed.concat(response.data.removed);
+      hasMore = response.data.has_more;
+      cursor = response.data.next_cursor;
+
+      console.log(
+        `Sync page: +${response.data.added.length} added, ~${response.data.modified.length} modified, -${response.data.removed.length} removed, has_more=${response.data.has_more}`
+      );
+    }
+
+    const pendingAdded = added.filter(tx => tx.pending);
+    console.log(`Total: +${added.length} added (${pendingAdded.length} pending), ~${modified.length} modified, -${removed.length} removed`);
+    if (pendingAdded.length > 0) {
+      console.log('Pending transactions from Plaid:', JSON.stringify(pendingAdded.map(tx => ({
+        id: tx.transaction_id,
+        name: tx.name,
+        amount: tx.amount,
+        date: tx.date,
+        account_id: tx.account_id,
+      })), null, 2));
+    } else {
+      console.log('No pending transactions returned by Plaid for item', itemId);
+    }
+
     let insertedCount = 0;
-    for (const tx of allTransactions) {
+    let skippedNoAccount = 0;
+
+    // Upsert added and modified transactions
+    for (const tx of [...added, ...modified]) {
       const accountId = accountMap.get(tx.account_id);
-      if (!accountId) continue;
+      if (!accountId) {
+        skippedNoAccount++;
+        continue;
+      }
+
+      const category = mapCategory(tx.personal_finance_category?.primary || tx.category?.[0]);
+
+      const qualityScore = dqService.scoreSingleTransaction({
+        is_pending: tx.pending,
+        pending_captured_at: tx.pending ? new Date() : null, // will be set by SQL CASE below
+      });
 
       try {
         await pool.query(
-          `INSERT INTO transactions (account_id, plaid_transaction_id, amount, date, name, category, merchant_name, merchant_id, is_pending)
-           VALUES ($1, $2, $3, $4, $5, $6::transaction_category, $7, $8, $9)
+          `INSERT INTO transactions (account_id, plaid_transaction_id, amount, date, name, category, merchant_name, merchant_id, is_pending, pending_captured_at, data_quality_score)
+           VALUES ($1, $2, $3, $4, $5, $6::transaction_category, $7, $8, $9, CASE WHEN $9 THEN CURRENT_TIMESTAMP ELSE NULL END, $10)
            ON CONFLICT (plaid_transaction_id) DO UPDATE SET
-             amount = $3,
-             is_pending = $9,
+             amount = EXCLUDED.amount,
+             date = EXCLUDED.date,
+             name = EXCLUDED.name,
+             category = EXCLUDED.category,
+             merchant_name = EXCLUDED.merchant_name,
+             is_pending = EXCLUDED.is_pending,
+             data_quality_score = EXCLUDED.data_quality_score,
              updated_at = CURRENT_TIMESTAMP`,
           [
             accountId,
             tx.transaction_id,
-            Math.abs(tx.amount), // Use absolute value
+            tx.amount,
             tx.date,
             tx.merchant_name || tx.name,
-            mapCategory(tx.personal_finance_category?.primary || tx.category?.[0]),
+            category,
             tx.merchant_name || tx.name,
             tx.merchant_id,
             tx.pending,
+            qualityScore,
           ]
         );
         insertedCount++;
-      } catch (error) {
-        console.error('Error inserting transaction:', error);
+      } catch (error: any) {
+        if (error.message?.includes('invalid input value for enum')) {
+          try {
+            await pool.query(
+              `INSERT INTO transactions (account_id, plaid_transaction_id, amount, date, name, category, merchant_name, merchant_id, is_pending, pending_captured_at, data_quality_score)
+               VALUES ($1, $2, $3, $4, $5, 'OTHER'::transaction_category, $6, $7, $8, CASE WHEN $8 THEN CURRENT_TIMESTAMP ELSE NULL END, $9)
+               ON CONFLICT (plaid_transaction_id) DO UPDATE SET
+                 amount = EXCLUDED.amount,
+                 date = EXCLUDED.date,
+                 name = EXCLUDED.name,
+                 merchant_name = EXCLUDED.merchant_name,
+                 is_pending = EXCLUDED.is_pending,
+                 data_quality_score = EXCLUDED.data_quality_score,
+                 updated_at = CURRENT_TIMESTAMP`,
+              [accountId, tx.transaction_id, tx.amount, tx.date, tx.merchant_name || tx.name, tx.merchant_name || tx.name, tx.merchant_id, tx.pending, qualityScore]
+            );
+            insertedCount++;
+          } catch (retryError) {
+            console.error(`Failed to insert transaction ${tx.transaction_id} even with fallback:`, retryError);
+          }
+        } else if (error.message?.includes('transactions_account_id_date_name_amount_key')) {
+          // Duplicate natural key — same transaction appeared under a different Plaid ID (re-issued after
+          // pending→posted transition). Safe to skip; the existing row is already correct.
+        } else {
+          console.error(`Error inserting transaction ${tx.transaction_id}:`, error.message);
+        }
       }
     }
 
-    // Update last sync time
+    // Delete removed transactions (pending transactions that were cancelled or superseded)
+    for (const tx of removed) {
+      await pool.query(
+        'DELETE FROM transactions WHERE plaid_transaction_id = $1',
+        [tx.transaction_id]
+      );
+    }
+
+    console.log(`Sync complete: ${insertedCount} upserted, ${removed.length} removed, ${skippedNoAccount} skipped (no account match)`);
+
+    // Save the new cursor and update last sync time
     await pool.query(
-      'UPDATE plaid_items SET last_synced_at = CURRENT_TIMESTAMP WHERE item_id = $1',
-      [itemId]
+      'UPDATE plaid_items SET transactions_cursor = $1, last_synced_at = CURRENT_TIMESTAMP WHERE item_id = $2',
+      [cursor, itemId]
     );
 
     return insertedCount;

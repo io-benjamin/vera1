@@ -1,14 +1,13 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import { Account, SpendingCheckup, MonthlySpending } from '../types';
-import { getToken } from '../services/api';
+import React, { createContext, useContext, useState, useEffect, useRef, ReactNode } from 'react';
+import { AppState, AppStateStatus } from 'react-native';
+import { Account, MonthlySpending } from '../types';
+import { getToken, syncTransactions } from '../services/api';
 
 interface AppContextType {
   accounts: Account[];
-  currentCheckup: SpendingCheckup | null;
   monthlySpending: MonthlySpending | null;
   setAccounts: (accounts: Account[]) => void;
   addAccount: (account: Account) => void;
-  setCurrentCheckup: (checkup: SpendingCheckup) => void;
   setMonthlySpending: (spending: MonthlySpending) => void;
   refreshAccounts: () => Promise<void>;
 }
@@ -17,7 +16,6 @@ const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [accounts, setAccountsState] = useState<Account[]>([]);
-  const [currentCheckup, setCurrentCheckupState] = useState<SpendingCheckup | null>(null);
   const [monthlySpending, setMonthlySpendingState] = useState<MonthlySpending | null>(null);
 
   const setAccounts = (accountsList: Account[]) => {
@@ -26,10 +24,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const addAccount = (account: Account) => {
     setAccountsState((prev) => [...prev, account]);
-  };
-
-  const setCurrentCheckup = (checkup: SpendingCheckup) => {
-    setCurrentCheckupState(checkup);
   };
 
   const setMonthlySpending = (spending: MonthlySpending) => {
@@ -72,15 +66,33 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     refreshAccounts();
   }, []);
 
+  // Silent background sync whenever the app comes to the foreground
+  const appState = useRef(AppState.currentState);
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', async (next: AppStateStatus) => {
+      const wasBackground = appState.current.match(/inactive|background/);
+      const isForeground = next === 'active';
+      appState.current = next;
+
+      if (wasBackground && isForeground) {
+        try {
+          await syncTransactions();
+          await refreshAccounts();
+        } catch {
+          // Silent — don't surface sync errors to the user
+        }
+      }
+    });
+    return () => subscription.remove();
+  }, []);
+
   return (
     <AppContext.Provider
       value={{
         accounts,
-        currentCheckup,
         monthlySpending,
         setAccounts,
         addAccount,
-        setCurrentCheckup,
         setMonthlySpending,
         refreshAccounts,
       }}

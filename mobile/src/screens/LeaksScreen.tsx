@@ -96,14 +96,11 @@ export default function LeaksScreen() {
     try {
       const data = await api.getLeaks(false);
       // Use demo data if no leaks returned
-      if (!data?.leaks?.length) {
-        setLeaksData(DEMO_LEAKS);
-      } else {
+      if (data?.leaks?.length) {
         setLeaksData(data);
       }
     } catch (error: any) {
-      // Use demo data on error for testing
-      setLeaksData(DEMO_LEAKS);
+      console.error('Error loading leaks:', error);
     } finally {
       setIsLoading(false);
       setIsRefreshing(false);

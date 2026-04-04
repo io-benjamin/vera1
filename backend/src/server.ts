@@ -12,7 +12,10 @@ import leaksRoutes from './routes/leaks.routes';
 import habitsRoutes from './routes/habits.routes';
 import analysisRoutes from './routes/analysis.routes';
 import mockRoutes from './routes/mock.routes';
+import { createTimePromptsRoutes } from './routes/time-prompts.routes';
+import { createTimelineRoutes } from './routes/timeline.routes';
 import { runMigrations } from './database/migrationRunner';
+import { syncTransactions } from './services/plaidService';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -44,6 +47,8 @@ app.use('/api/habits', habitsRoutes);
 app.use('/api/analysis', analysisRoutes);
 app.use('/api/mock', mockRoutes);
 app.use('/api/reflections', createReflectionRoutes(plaidPool));
+app.use('/api/time-prompts', createTimePromptsRoutes(plaidPool));
+app.use('/api/timeline', createTimelineRoutes(plaidPool));
 
 // 404 handler
 app.use((req: Request, res: Response) => {
@@ -62,17 +67,50 @@ app.use((err: Error, req: Request, res: Response, next: express.NextFunction) =>
   });
 });
 
+/**
+ * Background sync — runs every 15 minutes as a fallback for missed Plaid webhooks.
+ * Iterates all plaid_items and syncs transactions incrementally via cursor.
+ */
+async function startBackgroundSync() {
+  const INTERVAL_MS = 15 * 60 * 1000;
+
+  const runSync = async () => {
+    try {
+      const result = await plaidPool.query(
+        'SELECT item_id, user_id FROM plaid_items ORDER BY last_synced_at ASC NULLS FIRST'
+      );
+      if (result.rows.length === 0) return;
+
+      console.log(`[background-sync] Syncing ${result.rows.length} items`);
+      for (const { item_id, user_id } of result.rows) {
+        try {
+          await syncTransactions(plaidPool, user_id, item_id);
+        } catch (err) {
+          console.error(`[background-sync] Failed for item ${item_id}:`, err);
+        }
+      }
+    } catch (err) {
+      console.error('[background-sync] Query failed:', err);
+    }
+  };
+
+  // Run once shortly after startup, then every 15 minutes
+  setTimeout(runSync, 30 * 1000);
+  setInterval(runSync, INTERVAL_MS);
+  console.log('🔄 Background sync scheduled every 15 minutes');
+}
+
 // Start server with migrations
 async function startServer() {
   try {
-    // Run database migrations
     await runMigrations();
 
-    // Start the server
     app.listen(PORT, () => {
       console.log(`🚀 Server running on http://localhost:${PORT}`);
       console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
     });
+
+    startBackgroundSync();
   } catch (error) {
     console.error('❌ Failed to start server:', error);
     process.exit(1);

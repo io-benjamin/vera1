@@ -47,6 +47,7 @@ export default function LoginScreen({ navigation }: Props) {
       <KeyboardAvoidingView
         style={styles.container}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 80 : 0}
       >
         <View style={styles.content}>
           {/* Header */}
@@ -74,8 +75,11 @@ export default function LoginScreen({ navigation }: Props) {
                 onFocus={() => setFocusedInput('email')}
                 onBlur={() => setFocusedInput(null)}
                 keyboardType="email-address"
+                textContentType="emailAddress"
+                autoComplete="email"
                 autoCapitalize="none"
                 autoCorrect={false}
+                returnKeyType="next"
                 editable={!isLoading}
               />
             </View>
@@ -94,6 +98,9 @@ export default function LoginScreen({ navigation }: Props) {
                 onFocus={() => setFocusedInput('password')}
                 onBlur={() => setFocusedInput(null)}
                 secureTextEntry
+                textContentType="password"
+                autoComplete="password"
+                returnKeyType="done"
                 editable={!isLoading}
               />
             </View>

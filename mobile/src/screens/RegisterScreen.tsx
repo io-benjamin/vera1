@@ -88,8 +88,23 @@ export default function RegisterScreen({ navigation }: Props) {
         onBlur={() => setFocusedInput(null)}
         secureTextEntry={options?.secureTextEntry}
         keyboardType={options?.keyboardType || 'default'}
+        textContentType={
+          key === 'email'
+            ? 'emailAddress'
+            : key === 'password' || key === 'confirmPassword'
+            ? 'password'
+            : 'none'
+        }
+        autoComplete={
+          key === 'email'
+            ? 'email'
+            : key === 'password' || key === 'confirmPassword'
+            ? 'password'
+            : 'off'
+        }
         autoCapitalize={options?.autoCapitalize || 'sentences'}
         autoCorrect={false}
+        returnKeyType={key === 'confirmPassword' ? 'done' : 'next'}
         editable={!isLoading}
       />
     </View>
@@ -100,10 +115,12 @@ export default function RegisterScreen({ navigation }: Props) {
       <KeyboardAvoidingView
         style={styles.container}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 80 : 0}
       >
         <ScrollView
           contentContainerStyle={styles.scrollContent}
           keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="interactive"
           showsVerticalScrollIndicator={false}
         >
           <View style={styles.content}>

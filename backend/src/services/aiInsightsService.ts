@@ -6,13 +6,13 @@ import {
   AIHabitInsight,
   HabitsResponse,
   Transaction,
-  TransactionCategory,
   HabitSummary,
   LearnedPattern,
-  InsightLearning,
 } from '../models/types';
 import { PatternLearningService } from './patternLearningService';
 import { ReflectionService } from './reflectionService';
+import { DataQualityService } from './dataQualityService';
+import { buildTimeSummaryContext } from './dataReliabilityService';
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
@@ -31,11 +31,13 @@ export class AIInsightsService {
   private pool: Pool;
   private patternLearningService: PatternLearningService;
   private reflectionService: ReflectionService;
+  private dataQualityService: DataQualityService;
 
   constructor(pool: Pool) {
     this.pool = pool;
     this.patternLearningService = new PatternLearningService(pool);
     this.reflectionService = new ReflectionService(pool);
+    this.dataQualityService = new DataQualityService(pool);
   }
 
   /**
@@ -51,16 +53,23 @@ export class AIInsightsService {
         habits,
         summary,
         ai_insights: [],
-        coaching_message: "We need more transaction data to identify your spending patterns. Upload a few more statements and we'll give you personalized insights.",
+        coaching_message: "We need more transaction data to identify your spending patterns. Make sure your bank account is connected and synced.",
       };
     }
 
+    // Check if cached insights are still fresh (no habit updated since last AI run)
+    const cached = await this.getCachedInsightsIfFresh(userId, habits);
+    if (cached) {
+      return { habits, summary, ai_insights: cached.insights, coaching_message: cached.coaching_message };
+    }
+
     // Get all context in parallel
-    const [transactions, reflectionContext, feedbackContext, learningsContext] = await Promise.all([
+    const [transactions, reflectionContext, feedbackContext, learningsContext, dataQualityContext] = await Promise.all([
       this.getRecentTransactions(userId, 30),
       this.reflectionService.buildReflectionContext(userId),
       this.getFeedbackContext(userId),
       this.getInsightLearningsContext(userId),
+      this.dataQualityService.buildDataQualityContext(userId),
     ]);
 
     const habitContext = this.buildHabitContext(
@@ -68,7 +77,8 @@ export class AIInsightsService {
       transactions,
       reflectionContext,
       feedbackContext,
-      learningsContext
+      learningsContext,
+      dataQualityContext
     );
 
     try {
@@ -137,7 +147,7 @@ export class AIInsightsService {
       return {
         title: 'Not Enough Data',
         content: 'We need more transactions to generate weekly insights. Keep tracking!',
-        action: 'Upload more statements to unlock insights',
+        action: 'Sync your bank account to unlock insights',
       };
     }
 
@@ -545,50 +555,79 @@ ${prompt}`,
   // ============================================
 
   private getSystemPrompt(): string {
-    return `You are a behavioral financial analyst building a cumulative understanding of a user's financial behavior.
+    return `You are a financial behavior intelligence assistant.
+
+Your role is to help users understand their spending patterns and reflect on their financial behavior over time.
+
+You are NOT:
+- a financial advisor
+- a judge
+- a therapist
+- an authority telling users what to do
+
+You ARE:
+- a neutral observer
+- a pattern recognizer
+- a thoughtful guide
+- a reflection partner
 
 You are given:
 1. Detected spending patterns (from transaction data)
 2. User reflections — their own words about why they spend the way they do
 3. What you've previously learned about this user (if available)
-4. Feedback on past insights — which conclusions were helpful vs. not
+4. Feedback on past insights — which were helpful vs. not
 
-Your job:
-- Identify recurring behavioral themes by connecting patterns AND reflections
-- Do NOT treat a single reflection as absolute truth — look for themes across multiple responses
-- When a user's reflections explain a pattern, weight that explanation heavily
-- When confidence is low, say so explicitly and ask a question instead of stating a conclusion
-- Do NOT repeat insights the user has marked as not helpful
-- Build on insights the user marked as helpful — go deeper into those patterns
+CORE RULES:
 
-Rules:
-- Never assume user intent as fact
-- Be direct but non-judgmental — curious, not critical
-- If you don't have enough information, say what you'd want to know
-- Prefer a precise low-confidence insight over a vague high-confidence one
+1. NEVER assume intent as fact.
+   Do NOT say: "You spent this because you were stressed."
+   Instead say: "You mentioned feeling stressed in similar situations" or "This pattern may suggest..."
 
-Response format (JSON):
+2. USE EVIDENCE-BASED LANGUAGE.
+   Ground every insight in transaction data, detected patterns, or user reflections.
+   Use phrases like: "We observed...", "You reported...", "This pattern appears...", "Based on recent activity..."
+
+3. EXPRESS UNCERTAINTY.
+   Always include a confidence level: low, medium, or high.
+   If unsure, ask a question instead of making a claim.
+
+4. PRIORITIZE SELF-AWARENESS OVER INSTRUCTION.
+   Do NOT tell users what to do. Do NOT recommend actions.
+   Instead: help them notice patterns, help them reflect, guide them to their own conclusions.
+
+5. BE CALM, CLEAR, AND NON-JUDGMENTAL.
+   Tone: neutral, supportive, slightly analytical — never emotional or dramatic.
+   Avoid: hype language, fear-based language, shame, guilt.
+
+6. CONNECT PATTERNS OVER TIME.
+   Look for repeated behaviors, recurring triggers, trends across multiple events.
+   Do NOT base insights on a single event unless clearly stated.
+
+7. USE REFLECTIONS AS CONTEXT, NOT TRUTH.
+   Look for repeated themes. Avoid overfitting to one answer.
+
+8. Do NOT repeat insights the user has marked as not helpful.
+   Build on insights the user marked as helpful — go deeper.
+
+Response format (JSON only, no markdown):
 {
   "insights": [
     {
       "habit_type": "HABIT_TYPE",
-      "psychological_trigger": "What drives this behavior, using their own words where available",
-      "behavioral_pattern": "The underlying pattern connecting transactions and reflections",
-      "recommended_intervention": "Specific action, grounded in what they told you",
-      "difficulty_to_change": "easy" | "moderate" | "hard",
-      "potential_savings": <number>,
-      "confidence": <0.0 to 1.0>,
-      "alternative_suggestions": ["alternative 1", "alternative 2", "alternative 3"]
+      "insight": "Observation grounded in data and/or user reflections — neutral, evidence-based",
+      "pattern_summary": "Brief summary of the recurring pattern observed",
+      "confidence": "low | medium | high",
+      "reflection_question": "An open, non-judgmental question to help the user reflect"
     }
   ],
   "learnings": [
     {
       "insight_summary": "One sentence: what you now know about this user",
       "learned_behavior": "The specific behavioral tendency identified",
-      "confidence": <0.0 to 1.0>
+      "confidence": 0.0
     }
   ],
-  "coaching_message": "2-3 sentence direct message using what you know about this user specifically"
+  "coaching_message": "2-3 sentence neutral observation about the user's overall pattern. No advice. No instructions. Help them see, not fix."
 }`;
   }
 
@@ -597,7 +636,8 @@ Response format (JSON):
     transactions: Transaction[],
     reflectionContext?: string,
     feedbackContext?: string,
-    learningsContext?: string
+    learningsContext?: string,
+    dataQualityContext?: string
   ): string {
     const habitSummary = habits.map((h) => `
 - ${h.title} (${h.habit_type})
@@ -606,12 +646,17 @@ Response format (JSON):
   Occurrences: ${h.occurrence_count}
   Avg Amount: $${h.avg_amount.toFixed(2)}
   Triggers: ${JSON.stringify(h.trigger_conditions)}
+  Data Quality: ${h.data_quality_score != null ? parseFloat(String(h.data_quality_score)).toFixed(2) : 'unknown'}${h.confidence_reason ? ` (${h.confidence_reason})` : ''}
 `).join('\n');
 
     const totalImpact = habits.reduce((sum, h) => sum + h.monthly_impact, 0);
     const recentSpend = transactions.reduce((sum, tx) => sum + Math.abs(tx.amount), 0);
 
+    const timeSummaryContext = buildTimeSummaryContext(transactions);
+
     const sections = [
+      dataQualityContext || '',
+      timeSummaryContext || '',
       `DETECTED HABITS:\n${habitSummary}`,
       `SUMMARY:\n- Total Monthly Impact: $${totalImpact.toFixed(2)}\n- Last 30 Days Spending: $${recentSpend.toFixed(2)}\n- Number of Habits: ${habits.length}`,
       `RECENT TRANSACTIONS (sample):\n${transactions.slice(0, 15).map((t) => `${t.date}: ${t.merchant_name || t.name} - $${Math.abs(t.amount).toFixed(2)} (${t.category || 'OTHER'})`).join('\n')}`,
@@ -637,12 +682,10 @@ Response format (JSON):
 
       const ai_insights: AIHabitInsight[] = (parsed.insights || []).map((insight: any) => ({
         habit_type: insight.habit_type as HabitType,
-        psychological_trigger: insight.psychological_trigger || 'Unknown trigger',
-        behavioral_pattern: insight.behavioral_pattern || 'Pattern detected',
-        recommended_intervention: insight.recommended_intervention || 'Review this habit',
-        difficulty_to_change: insight.difficulty_to_change || 'moderate',
-        potential_savings: insight.potential_savings || 0,
-        alternative_suggestions: insight.alternative_suggestions || [],
+        insight: insight.insight || 'A pattern was observed in your spending.',
+        pattern_summary: insight.pattern_summary || 'Pattern detected',
+        confidence: (['low', 'medium', 'high'].includes(insight.confidence) ? insight.confidence : 'medium') as 'low' | 'medium' | 'high',
+        reflection_question: insight.reflection_question || 'What stands out to you about this pattern?',
       }));
 
       const learnings = (parsed.learnings || []).map((l: any) => ({
@@ -660,7 +703,7 @@ Response format (JSON):
       console.error('Error parsing AI response:', error);
       return {
         ai_insights: this.generateFallbackInsights(habits),
-        coaching_message: 'Focus on your biggest habit first. Small changes add up.',
+        coaching_message: 'We observed several recurring patterns in your recent spending. Syncing more data over time will help surface clearer trends.',
         learnings: [],
       };
     }
@@ -671,113 +714,88 @@ Response format (JSON):
   }
 
   private generateFallbackInsight(habit: DetectedHabit): AIHabitInsight {
-    const insights: Record<HabitType, Partial<AIHabitInsight>> = {
+    const insights: Record<HabitType, { insight: string; pattern_summary: string; reflection_question: string }> = {
       [HabitType.LATE_NIGHT_SPENDING]: {
-        psychological_trigger: 'Fatigue and lowered impulse control',
-        behavioral_pattern: 'Decision fatigue makes late-night purchases feel justified',
-        recommended_intervention: 'Remove saved payment methods from apps you browse at night',
-        difficulty_to_change: 'moderate',
-        alternative_suggestions: ['Make a "sleep on it" rule for purchases after 9pm', 'Set app timers', 'Keep a wishlist instead of buying'],
+        insight: `We observed ${habit.occurrence_count} transactions occurring late at night over the past period.`,
+        pattern_summary: 'Spending appears to cluster in late-night hours.',
+        reflection_question: 'What tends to be different about late-night situations compared to other times of day?',
       },
       [HabitType.WEEKEND_SPLURGE]: {
-        psychological_trigger: 'Reward-seeking after a week of work',
-        behavioral_pattern: 'Weekend = freedom mindset leads to looser spending',
-        recommended_intervention: 'Set a specific weekend fun budget in cash',
-        difficulty_to_change: 'moderate',
-        alternative_suggestions: ['Plan free activities', 'Use a separate weekend card with a limit', 'Find rewards that don\'t cost money'],
+        insight: `Based on recent activity, weekend spending appears noticeably higher than weekday spending.`,
+        pattern_summary: 'Higher spending frequency and amounts on weekends.',
+        reflection_question: 'What feels different about weekends that might influence your spending?',
       },
       [HabitType.WEEKLY_RITUAL]: {
-        psychological_trigger: 'Comfort and routine-seeking',
-        behavioral_pattern: 'The ritual itself provides comfort, not just the purchase',
-        recommended_intervention: 'Keep the ritual, reduce the cost - make coffee at home before going',
-        difficulty_to_change: 'easy',
-        alternative_suggestions: ['Reduce frequency by one day', 'Downsize your usual order', 'Bring your own and just enjoy the atmosphere'],
+        insight: `We observed visits to ${habit.title.replace(' Ritual', '')} recurring on the same day of the week, ${habit.occurrence_count} times.`,
+        pattern_summary: 'A consistent weekly visit pattern to the same merchant.',
+        reflection_question: 'What does this routine mean to you beyond the purchase itself?',
       },
       [HabitType.IMPULSE_PURCHASE]: {
-        psychological_trigger: 'Dopamine hit from buying, not from owning',
-        behavioral_pattern: 'The excitement fades quickly, leading to more purchases',
-        recommended_intervention: '24-hour rule for any purchase over $30',
-        difficulty_to_change: 'hard',
-        alternative_suggestions: ['Add to cart but don\'t buy for 24h', 'Unsubscribe from retail emails', 'Delete shopping apps from phone'],
+        insight: `We observed ${habit.occurrence_count} purchases significantly above your typical spending amounts in this category.`,
+        pattern_summary: 'Occasional high-amount purchases that stand out from your baseline.',
+        reflection_question: 'What was going on for you at the time of these larger purchases?',
       },
       [HabitType.POST_PAYDAY_SURGE]: {
-        psychological_trigger: 'Scarcity mindset followed by abundance feeling',
-        behavioral_pattern: 'Money feels "available" right after payday',
-        recommended_intervention: 'Set up automatic transfers on payday before you can spend',
-        difficulty_to_change: 'moderate',
-        alternative_suggestions: ['Pay yourself first with auto-savings', 'Use envelope budgeting', 'Pretend payday is 3 days later'],
+        insight: `Spending appears to increase in the days following typical payday dates. This pattern appeared ${habit.occurrence_count} times.`,
+        pattern_summary: 'Elevated spending in the days following payday.',
+        reflection_question: 'How does having money available influence how you approach spending decisions?',
       },
       [HabitType.COMFORT_SPENDING]: {
-        psychological_trigger: 'Using purchases to regulate emotions',
-        behavioral_pattern: 'Shopping provides temporary relief from stress/boredom',
-        recommended_intervention: 'Identify your top 3 non-purchase comfort activities',
-        difficulty_to_change: 'hard',
-        alternative_suggestions: ['Call a friend when tempted', 'Exercise instead', 'Set a "thinking" period before buying'],
+        insight: `We observed a recurring pattern of shopping activity that may be connected to emotional states based on timing and frequency.`,
+        pattern_summary: 'Shopping activity appears in recurring emotional or situational contexts.',
+        reflection_question: 'What do you notice about what precedes these purchases?',
       },
       [HabitType.RECURRING_INDULGENCE]: {
-        psychological_trigger: 'Treating yourself has become automatic',
-        behavioral_pattern: 'What started as occasional became expected',
-        recommended_intervention: 'Make indulgences intentional - schedule them',
-        difficulty_to_change: 'moderate',
-        alternative_suggestions: ['Reduce frequency gradually', 'Find cheaper alternatives', 'Make it a real treat, not a habit'],
+        insight: `This category shows consistent recurring spending across the observation period.`,
+        pattern_summary: 'Regular, predictable spending on a particular type of purchase.',
+        reflection_question: 'How intentional does this feel compared to when it first started?',
       },
       [HabitType.BINGE_SHOPPING]: {
-        psychological_trigger: 'All-or-nothing thinking, emotional overwhelm',
-        behavioral_pattern: 'One purchase opens the floodgates',
-        recommended_intervention: 'Limit yourself to 3 items max per shopping session',
-        difficulty_to_change: 'hard',
-        alternative_suggestions: ['Shop with a list only', 'Leave cards at home', 'Wait a week between shopping trips'],
+        insight: `We observed ${habit.occurrence_count} days where multiple shopping transactions occurred in a single session.`,
+        pattern_summary: 'Multiple purchases concentrated on the same day, several times over.',
+        reflection_question: 'What tends to be happening on the days when multiple purchases occur?',
       },
       [HabitType.MEAL_DELIVERY_HABIT]: {
-        psychological_trigger: 'Convenience addiction, decision fatigue around food',
-        behavioral_pattern: 'Delivery feels "necessary" but costs 3x cooking',
-        recommended_intervention: 'Meal prep on Sundays to remove the decision burden',
-        difficulty_to_change: 'moderate',
-        alternative_suggestions: ['Batch cook simple meals', 'Keep easy backup meals frozen', 'Delete delivery apps for a week'],
+        insight: `Food delivery spending appeared ${habit.occurrence_count} times, averaging $${habit.avg_amount.toFixed(0)} per order.`,
+        pattern_summary: 'Frequent food delivery spending across the observation period.',
+        reflection_question: 'What tends to drive the decision to order delivery in the moment?',
       },
       [HabitType.CAFFEINE_RITUAL]: {
-        psychological_trigger: 'Social ritual, productivity cue, caffeine dependency',
-        behavioral_pattern: 'The coffee shop trip is about more than coffee',
-        recommended_intervention: 'Make great coffee at home, save shop visits for socializing',
-        difficulty_to_change: 'easy',
-        alternative_suggestions: ['Invest in good home coffee', 'Reduce visits by 2/week', 'Order smaller sizes'],
+        insight: `We observed ${habit.occurrence_count} visits to coffee merchants, with spending averaging $${habit.avg_amount.toFixed(2)} per visit.`,
+        pattern_summary: 'Frequent, consistent coffee shop visits.',
+        reflection_question: 'What does this routine provide beyond the coffee itself?',
+      },
+      [HabitType.STRESS_SPENDING_DAY]: {
+        insight: `We observed ${habit.occurrence_count} days with scattered spending across multiple categories in quick succession.`,
+        pattern_summary: 'High-frequency multi-category spending concentrated on specific days.',
+        reflection_question: 'What was going on in your life on days when you found yourself buying across many different categories?',
       },
     };
 
-    const defaultInsight = insights[habit.habit_type] || {
-      psychological_trigger: 'Habitual behavior pattern',
-      behavioral_pattern: 'This has become automatic spending',
-      recommended_intervention: 'Track this for a week consciously',
-      difficulty_to_change: 'moderate' as const,
-      alternative_suggestions: ['Pause before each purchase', 'Ask if you need it or want it', 'Find a free alternative'],
+    const fallback = insights[habit.habit_type] ?? {
+      insight: `We observed a recurring pattern in your spending behavior across ${habit.occurrence_count} instances.`,
+      pattern_summary: 'A consistent spending pattern was detected.',
+      reflection_question: 'What stands out to you when you look at this pattern?',
     };
 
     return {
       habit_type: habit.habit_type,
-      psychological_trigger: defaultInsight.psychological_trigger!,
-      behavioral_pattern: defaultInsight.behavioral_pattern!,
-      recommended_intervention: defaultInsight.recommended_intervention!,
-      difficulty_to_change: defaultInsight.difficulty_to_change as 'easy' | 'moderate' | 'hard',
-      potential_savings: habit.monthly_impact * 0.5, // Assume 50% reduction possible
-      alternative_suggestions: defaultInsight.alternative_suggestions!,
+      insight: fallback.insight,
+      pattern_summary: fallback.pattern_summary,
+      confidence: 'medium',
+      reflection_question: fallback.reflection_question,
     };
   }
 
   private generateFallbackCoaching(habits: DetectedHabit[], summary: HabitSummary): string {
     if (habits.length === 0) {
-      return 'Upload more statements to unlock personalized insights about your spending patterns.';
+      return 'We need more transaction data to identify patterns. Syncing your account regularly will help build a clearer picture over time.';
     }
 
     const topHabit = habits[0];
     const totalImpact = summary.total_monthly_impact;
 
-    if (totalImpact > 500) {
-      return `Your habits are costing you $${totalImpact.toFixed(0)}/month. That's real money. Start with ${topHabit.title.toLowerCase()} - it's your biggest leak.`;
-    } else if (totalImpact > 200) {
-      return `$${totalImpact.toFixed(0)}/month in habit spending. Not terrible, but there's room to improve. Your ${topHabit.title.toLowerCase()} is worth addressing first.`;
-    } else {
-      return `$${totalImpact.toFixed(0)}/month in detected habits. You're doing okay, but small improvements add up. Keep an eye on ${topHabit.title.toLowerCase()}.`;
-    }
+    return `We observed ${habits.length} recurring pattern${habits.length > 1 ? 's' : ''} in your recent spending, totaling approximately $${totalImpact.toFixed(0)} per month. The most prominent appears to be ${topHabit.title.toLowerCase()}. These patterns may be worth exploring further.`;
   }
 
   private async getRecentTransactions(userId: string, days: number): Promise<Transaction[]> {
@@ -803,6 +821,12 @@ Response format (JSON):
       category: row.category,
       merchant_name: row.merchant_name,
       is_pending: row.is_pending,
+      pending_captured_at: row.pending_captured_at ?? null,
+      user_time_of_day: row.user_time_of_day ?? null,
+      inferred_time_of_day: row.inferred_time_of_day ?? null,
+      time_source: row.time_source ?? null,
+      time_confidence: row.time_confidence ?? null,
+      first_seen_at: row.first_seen_at ?? null,
     }));
   }
 
@@ -880,22 +904,71 @@ Response format (JSON):
     return true;
   }
 
+  /**
+   * Returns cached AI insights if none of the user's habits have been updated
+   * since the last time insights were generated. Returns null when stale.
+   */
+  private async getCachedInsightsIfFresh(
+    userId: string,
+    habits: DetectedHabit[]
+  ): Promise<{ insights: AIHabitInsight[]; coaching_message: string } | null> {
+    // Most recent insight run
+    const lastRunResult = await this.pool.query(
+      `SELECT created_at FROM ai_insights WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [userId]
+    );
+    if (lastRunResult.rows.length === 0) return null;
+
+    const lastRun = new Date(lastRunResult.rows[0].created_at);
+
+    // Most recent habit update
+    const lastHabitUpdate = habits.reduce((max, h) => {
+      const t = new Date(h.updated_at);
+      return t > max ? t : max;
+    }, new Date(0));
+
+    // If any habit was updated after the last AI run, insights are stale
+    if (lastHabitUpdate > lastRun) return null;
+
+    // Load the cached insights
+    const insightRows = await this.pool.query(
+      `SELECT insight_type, title, content, confidence_score
+       FROM ai_insights
+       WHERE user_id = $1
+       ORDER BY created_at DESC
+       LIMIT 20`,
+      [userId]
+    );
+
+    if (insightRows.rows.length === 0) return null;
+
+    const insights: AIHabitInsight[] = insightRows.rows.map((row) => ({
+      habit_type: row.insight_type,
+      pattern_summary: row.title,
+      insight: row.content,
+      confidence: row.confidence_score >= 0.8 ? 'high' : row.confidence_score >= 0.5 ? 'medium' : 'low',
+      reflection_question: '',
+    }));
+
+    const coaching_message = insights.length > 0
+      ? `${insights.length} pattern${insights.length !== 1 ? 's' : ''} detected in your recent spending.`
+      : '';
+
+    return { insights, coaching_message };
+  }
+
   private async saveInsights(userId: string, insights: AIHabitInsight[]): Promise<void> {
     for (const insight of insights) {
       await this.pool.query(
         `INSERT INTO ai_insights
-         (user_id, insight_type, title, content, psychological_trigger,
-          recommended_action, potential_savings, confidence_score)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+         (user_id, insight_type, title, content, confidence_score)
+         VALUES ($1, $2, $3, $4, $5)`,
         [
           userId,
           insight.habit_type,
-          `${insight.habit_type} Insight`,
-          insight.behavioral_pattern,
-          insight.psychological_trigger,
-          insight.recommended_intervention,
-          insight.potential_savings,
-          0.8,
+          insight.pattern_summary,
+          insight.insight,
+          insight.confidence === 'high' ? 0.9 : insight.confidence === 'medium' ? 0.6 : 0.3,
         ]
       );
     }

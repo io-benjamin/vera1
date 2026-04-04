@@ -1,4 +1,5 @@
 import React, { createContext, useState, useContext, useEffect, ReactNode } from 'react';
+import * as WebBrowser from 'expo-web-browser';
 import * as api from '../services/api';
 
 interface AuthContextType {
@@ -6,6 +7,7 @@ interface AuthContextType {
   isLoading: boolean;
   isAuthenticated: boolean;
   login: (email: string, password: string) => Promise<void>;
+  loginWithOAuth: (provider: 'AppleOAuth' | 'GoogleOAuth') => Promise<void>;
   register: (data: {
     email: string;
     password: string;
@@ -45,12 +47,26 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   const login = async (email: string, password: string) => {
-    try {
-      const response = await api.login(email, password);
-      setUser(response.user);
-    } catch (error) {
-      throw error;
-    }
+    const response = await api.login(email, password);
+    setUser(response.user);
+  };
+
+  const loginWithOAuth = async (provider: 'AppleOAuth' | 'GoogleOAuth') => {
+    const url = await api.getOAuthUrl(provider);
+    const result = await WebBrowser.openAuthSessionAsync(url, 'com.vera.app://auth');
+
+    if (result.type !== 'success') return;
+
+    const params = new URL(result.url).searchParams;
+    const error = params.get('error');
+    if (error) throw new Error(decodeURIComponent(error));
+
+    const token = params.get('token');
+    if (!token) throw new Error('No token received');
+
+    await api.saveToken(token);
+    const currentUser = await api.getCurrentUser();
+    setUser(currentUser);
   };
 
   const register = async (data: {
@@ -88,6 +104,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     isLoading,
     isAuthenticated: !!user,
     login,
+    loginWithOAuth,
     register,
     logout,
     refreshUser,

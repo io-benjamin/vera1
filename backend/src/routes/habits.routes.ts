@@ -4,6 +4,7 @@ import { authMiddleware } from '../middleware/auth';
 import { HabitDetectionService } from '../services/habitDetectionService';
 import { AIInsightsService } from '../services/aiInsightsService';
 import { PatternLearningService } from '../services/patternLearningService';
+import { ReflectionService } from '../services/reflectionService';
 import { DetectedHabit } from '../models/types';
 
 const router = Router();
@@ -14,6 +15,7 @@ const pool = new Pool({
 const habitService = new HabitDetectionService(pool);
 const aiInsightsService = new AIInsightsService(pool);
 const patternLearningService = new PatternLearningService(pool);
+const reflectionService = new ReflectionService(pool);
 
 /**
  * Parse habit rows from database (DECIMAL fields come as strings)
@@ -50,6 +52,12 @@ router.get('/', authMiddleware(pool), async (req: Request, res: Response) => {
     // If no habits exist or force refresh requested, detect new ones
     if (habits.length === 0 || req.query.refresh === 'true') {
       habits = await habitService.detectHabits(userId, 90);
+      // Auto-generate reflection questions for newly detected habits
+      await Promise.all(
+        habits.map((h) =>
+          h.id ? reflectionService.generateQuestionsForHabit(userId, h.id, h).catch(() => {}) : Promise.resolve()
+        )
+      );
     }
 
     // Get summary
@@ -78,6 +86,14 @@ router.post('/detect', authMiddleware(pool), async (req: Request, res: Response)
     const days = parseInt(req.query.days as string) || 90;
 
     const habits = await habitService.detectHabits(userId, days);
+
+    // Auto-generate reflection questions for detected habits
+    await Promise.all(
+      habits.map((h) =>
+        h.id ? reflectionService.generateQuestionsForHabit(userId, h.id, h).catch(() => {}) : Promise.resolve()
+      )
+    );
+
     const summary = await habitService.getHabitSummary(userId);
     const response = await aiInsightsService.generateHabitInsights(userId, habits, summary);
 

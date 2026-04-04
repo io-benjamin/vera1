@@ -20,7 +20,49 @@ declare global {
 export function createPlaidRoutes(pool: Pool): Router {
   const router = Router();
 
-  // Apply auth middleware to all routes
+  /**
+   * POST /api/plaid/webhook
+   * Receives Plaid event notifications — NO auth middleware (Plaid calls this directly).
+   * Triggers an immediate transaction sync for the affected item.
+   *
+   * Key events:
+   *   TRANSACTIONS / SYNC_UPDATES_AVAILABLE → new transactions ready
+   *   TRANSACTIONS / DEFAULT_UPDATE          → legacy, treat same way
+   */
+  router.post('/webhook', async (req: Request, res: Response) => {
+    // Acknowledge immediately — Plaid will retry if we don't respond within 10s
+    res.status(200).json({ received: true });
+
+    const { webhook_type, webhook_code, item_id } = req.body;
+    console.log(`Plaid webhook: ${webhook_type}/${webhook_code} for item ${item_id}`);
+
+    const isTransactionEvent =
+      webhook_type === 'TRANSACTIONS' &&
+      (webhook_code === 'SYNC_UPDATES_AVAILABLE' || webhook_code === 'DEFAULT_UPDATE');
+
+    if (!isTransactionEvent || !item_id) return;
+
+    try {
+      // Look up which user owns this item
+      const itemResult = await pool.query(
+        'SELECT user_id FROM plaid_items WHERE item_id = $1',
+        [item_id]
+      );
+      if (itemResult.rows.length === 0) {
+        console.warn(`Webhook: unknown item_id ${item_id}`);
+        return;
+      }
+
+      const userId = itemResult.rows[0].user_id;
+      console.log(`Auto-syncing transactions for user ${userId} item ${item_id}`);
+      const count = await syncTransactions(pool, userId, item_id);
+      console.log(`Webhook sync complete: ${count} transactions upserted`);
+    } catch (err) {
+      console.error('Webhook sync failed:', err);
+    }
+  });
+
+  // Apply auth middleware to all remaining routes
   router.use(authMiddleware(pool));
 
   /**
@@ -36,9 +78,9 @@ export function createPlaidRoutes(pool: Pool): Router {
 
       const linkToken = await createLinkToken(pool, userId);
       res.json({ linkToken });
-    } catch (error) {
-      console.error('Error creating link token:', error);
-      res.status(500).json({ error: 'Failed to create link token' });
+    } catch (error: any) {
+      console.error('Error creating link token:', error?.message ?? error);
+      res.status(500).json({ error: error?.message ?? 'Failed to create link token' });
     }
   });
 
@@ -62,15 +104,18 @@ export function createPlaidRoutes(pool: Pool): Router {
       const result = await exchangePublicToken(pool, userId, publicToken);
       console.log('Exchange successful, itemId:', result.itemId);
 
-      // Automatically sync accounts after exchange
+      // Sync accounts
       console.log('Syncing accounts for item:', result.itemId);
       const accountCount = await syncAccountsForItem(pool, userId, result.itemId);
       console.log('Synced', accountCount, 'accounts');
 
-      res.json({ ...result, accountsSynced: accountCount });
-    } catch (error) {
-      console.error('Error exchanging token:', error);
-      res.status(500).json({ error: 'Failed to exchange token' });
+      // Note: transactions are NOT synced here because Plaid returns PRODUCT_NOT_READY
+      // immediately after linking. The user syncs manually after a short wait.
+      res.json({ ...result, accountsSynced: accountCount, transactionsSynced: 0 });
+    } catch (error: any) {
+      const plaidError = error?.response?.data;
+      console.error('Error exchanging token:', plaidError ?? error?.message ?? error);
+      res.status(500).json({ error: plaidError?.error_message ?? 'Failed to exchange token' });
     }
   });
 
@@ -123,7 +168,7 @@ export function createPlaidRoutes(pool: Pool): Router {
         return res.status(401).json({ error: 'Unauthorized' });
       }
 
-      const { days = 30 } = req.body;
+      const { force } = req.body;
 
       // Get all plaid items for user
       const itemsResult = await pool.query(
@@ -131,9 +176,19 @@ export function createPlaidRoutes(pool: Pool): Router {
         [userId]
       );
 
+      // force=true resets the cursor so the next sync is a full re-fetch
+      // This picks up pending transactions that may have been missed
+      if (force) {
+        await pool.query(
+          'UPDATE plaid_items SET transactions_cursor = NULL WHERE user_id = $1',
+          [userId]
+        );
+        console.log(`Force sync: cleared cursor for user ${userId}`);
+      }
+
       let totalSynced = 0;
       for (const item of itemsResult.rows) {
-        const count = await syncTransactions(pool, userId, item.item_id, days);
+        const count = await syncTransactions(pool, userId, item.item_id);
         totalSynced += count;
       }
 

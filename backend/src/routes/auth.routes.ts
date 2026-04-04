@@ -179,4 +179,50 @@ router.post('/change-password', authMiddleware(pool), async (req, res) => {
   }
 });
 
+/**
+ * GET /api/auth/oauth/authorize?provider=AppleOAuth|GoogleOAuth
+ * Returns the WorkOS authorization URL for the requested provider.
+ */
+router.get('/oauth/authorize', (req, res) => {
+  const { provider } = req.query;
+
+  if (provider !== 'AppleOAuth' && provider !== 'GoogleOAuth') {
+    return res.status(400).json({ error: 'provider must be AppleOAuth or GoogleOAuth' });
+  }
+
+  try {
+    const url = authService.getOAuthUrl(provider);
+    res.json({ url });
+  } catch (error) {
+    console.error('OAuth authorize error:', error);
+    res.status(500).json({ error: 'Failed to generate authorization URL' });
+  }
+});
+
+/**
+ * GET /api/auth/callback
+ * WorkOS redirect target. Exchanges code for user, issues JWT,
+ * then redirects to the app deep link: com.vera.app://auth?token=JWT
+ */
+router.get('/callback', async (req, res) => {
+  const { code, error, error_description } = req.query;
+
+  if (error) {
+    console.error('WorkOS OAuth error:', error, error_description);
+    return res.redirect(`com.vera.app://auth?error=${encodeURIComponent(String(error_description || error))}`);
+  }
+
+  if (!code || typeof code !== 'string') {
+    return res.redirect('com.vera.app://auth?error=missing_code');
+  }
+
+  try {
+    const { token } = await authService.findOrCreateWorkOSUser(code);
+    res.redirect(`com.vera.app://auth?token=${token}`);
+  } catch (err) {
+    console.error('OAuth callback error:', err);
+    res.redirect('com.vera.app://auth?error=auth_failed');
+  }
+});
+
 export default router;
