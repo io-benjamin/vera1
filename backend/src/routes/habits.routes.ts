@@ -39,18 +39,23 @@ router.get('/', authMiddleware(pool), async (req: Request, res: Response) => {
   try {
     const userId = req.userId!;
 
-    // First check if we have existing habits
+    // Check existing habits and staleness
     const existingResult = await pool.query(
-      `SELECT * FROM detected_habits
+      `SELECT *, updated_at FROM detected_habits
        WHERE user_id = $1
-       ORDER BY monthly_impact DESC`,
+       ORDER BY data_quality_score DESC NULLS LAST, monthly_impact DESC`,
       [userId]
     );
 
     let habits = parseHabitRows(existingResult.rows);
 
-    // If no habits exist or force refresh requested, detect new ones
-    if (habits.length === 0 || req.query.refresh === 'true') {
+    // Re-detect if: no habits, explicit refresh, or last update > 1 hour ago
+    const mostRecentUpdate = existingResult.rows[0]?.updated_at
+      ? new Date(existingResult.rows[0].updated_at).getTime()
+      : 0;
+    const stale = Date.now() - mostRecentUpdate > 60 * 60 * 1000;
+
+    if (habits.length === 0 || req.query.refresh === 'true' || stale) {
       habits = await habitService.detectHabits(userId, 90);
       // Auto-generate reflection questions for newly detected habits
       await Promise.all(
@@ -207,7 +212,8 @@ router.post('/:id/acknowledge', authMiddleware(pool), async (req: Request, res: 
 router.get('/insights/weekly', authMiddleware(pool), async (req: Request, res: Response) => {
   try {
     const userId = req.userId!;
-    const insight = await aiInsightsService.generateWeeklyInsight(userId);
+    const force = req.query.force === 'true';
+    const insight = await aiInsightsService.generateWeeklyInsight(userId, force);
 
     res.json({ insight });
   } catch (error) {

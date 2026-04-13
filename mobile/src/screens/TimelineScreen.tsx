@@ -11,36 +11,30 @@ import {
   View,
 } from 'react-native';
 import { colors } from '../theme/colors';
-import { typography } from '../theme/typography';
+import { fonts, typography } from '../theme/typography';
 import { getNarrativeTimeline, NarrativeUnit } from '../services/api';
 import { FadeInView } from '../components/FadeInView';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function localDateKey(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 function dateKeyToLabel(key: string): string {
   const now = new Date();
   const todayKey = localDateKey(now);
-  const yesterdayKey = localDateKey(
-    new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
-  );
-  if (key === todayKey) return 'Today';
+  const yesterdayKey = localDateKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1));
+  if (key === todayKey)     return 'Today';
   if (key === yesterdayKey) return 'Yesterday';
   const [y, m, d] = key.split('-').map(Number);
+  // Sentence case — "Wednesday, April 1" not "WEDNESDAY, APRIL 1"
   return new Date(y, m - 1, d).toLocaleDateString('en-US', {
     weekday: 'long', month: 'long', day: 'numeric',
   });
 }
 
-function groupByDate(
-  units: NarrativeUnit[]
-): { key: string; label: string; units: NarrativeUnit[] }[] {
+function groupByDate(units: NarrativeUnit[]): { key: string; label: string; units: NarrativeUnit[] }[] {
   const map = new Map<string, NarrativeUnit[]>();
   for (const u of units) {
     const key = String(u.date).split('T')[0];
@@ -48,9 +42,7 @@ function groupByDate(
     map.get(key)!.push(u);
   }
   return Array.from(map.entries()).map(([key, units]) => ({
-    key,
-    label: dateKeyToLabel(key),
-    units,
+    key, label: dateKeyToLabel(key), units,
   }));
 }
 
@@ -58,46 +50,29 @@ function fmt(n: number) {
   return new Intl.NumberFormat('en-US', {
     style: 'currency', currency: 'USD',
     minimumFractionDigits: 2, maximumFractionDigits: 2,
-  }).format(n);
+  }).format(Math.abs(n));
 }
 
-// Muted tint per trend — signal, not decoration
-const TREND_TINT = {
-  increasing:  { dot: '#C0392B', text: '#A0322A' },  // soft red, slightly darkened
-  stable:      { dot: '#AAAAAA', text: '#999999' },  // neutral grey
-  decreasing:  { dot: '#2E7D52', text: '#2D6A4F' },  // muted green
-  recovering:  { dot: '#2E7D52', text: '#2D6A4F' },  // same green — positive signal
-} as const;
 
-function trendTint(trend: 'increasing' | 'stable' | 'decreasing' | 'recovering') {
-  return TREND_TINT[trend] ?? TREND_TINT.stable;
+// Generic signals that add no information — filter these out
+const NOISE_SIGNALS = /continuing recent pattern|recent pattern|active pattern/i;
+
+function meaningfulSignal(signals: string[]): string | null {
+  return signals.find((s) => s.trim().length > 0 && !NOISE_SIGNALS.test(s)) ?? null;
 }
 
-function stateLabel(state: string, trend: string): string {
-  if (state === 'New') return 'New';
-  if (trend === 'increasing') return 'Increasing';
-  if (trend === 'decreasing' || trend === 'recovering') return 'Improving';
-  return 'Active';
-}
-
-// ─── Reflection ask button — scale on press ──────────────────────────────────
+// ─── Reflection ask ───────────────────────────────────────────────────────────
 
 function ReflectionAskButton({ question }: { question: string }) {
   const scale = useRef(new Animated.Value(1)).current;
-
   const onPressIn = () =>
     Animated.spring(scale, { toValue: 0.97, useNativeDriver: true, speed: 30, bounciness: 4 }).start();
-
   const onPressOut = () =>
     Animated.spring(scale, { toValue: 1, useNativeDriver: true, speed: 20, bounciness: 6 }).start();
 
   return (
-    <Animated.View style={{ transform: [{ scale }], marginTop: 6 }}>
-      <Pressable
-        onPressIn={onPressIn}
-        onPressOut={onPressOut}
-        style={itemStyles.reflectionAsk}
-      >
+    <Animated.View style={{ transform: [{ scale }], marginTop: 8 }}>
+      <Pressable onPressIn={onPressIn} onPressOut={onPressOut} style={itemStyles.reflectionAsk}>
         <Text style={itemStyles.reflectionAskText} numberOfLines={2}>{question}</Text>
         <Text style={itemStyles.reflectionAskCta}>Answer →</Text>
       </Pressable>
@@ -105,20 +80,32 @@ function ReflectionAskButton({ question }: { question: string }) {
   );
 }
 
-// ─── Fade-in wrapper — staggered per item ────────────────────────────────────
-
-// FadeInView is now imported from shared component
-
-// ─── Narrative Item ───────────────────────────────────────────────────────────
+// ─── Narrative item ───────────────────────────────────────────────────────────
 
 function NarrativeItem({ unit, isLast }: { unit: NarrativeUnit; isLast: boolean }) {
-  const tint = unit.pattern ? trendTint(unit.pattern.trend) : null;
+  const hasPattern = !!unit.pattern;
+
+  // One metadata line — priority: pattern tag > meaningful context signal
+  const metaLine: string | null = unit.pattern
+    ? unit.pattern.title
+    : unit.context?.signals
+      ? meaningfulSignal(unit.context.signals)
+      : null;
+
+  // Reflection: reframe "You said: 'X'" → "You noted: X"
+  const reflectionNote =
+    unit.reflection?.status === 'answered' && unit.reflection.answer
+      ? `You noted: ${unit.reflection.answer}`
+      : null;
 
   return (
     <View style={itemStyles.wrapper}>
-      {/* Left vertical line */}
-      <View style={itemStyles.lineCol}>
-        <View style={[itemStyles.dot, { backgroundColor: tint ? tint.dot : colors.border }]} />
+      {/* Left rail — dot + line */}
+      <View style={itemStyles.rail}>
+        <View style={[
+          itemStyles.dot,
+          { backgroundColor: hasPattern ? colors.accent : colors.border },
+        ]} />
         {!isLast && <View style={itemStyles.line} />}
       </View>
 
@@ -129,44 +116,34 @@ function NarrativeItem({ unit, isLast }: { unit: NarrativeUnit; isLast: boolean 
           <Text style={itemStyles.merchant} numberOfLines={1}>
             {unit.transaction.merchant}
           </Text>
-          <Text style={itemStyles.amount}>{fmt(unit.transaction.amount)}</Text>
+          <Text style={[
+            itemStyles.amount,
+            unit.transaction.isCredit && itemStyles.amountCredit,
+          ]}>
+            {unit.transaction.isCredit ? `+${fmt(unit.transaction.amount)}` : fmt(unit.transaction.amount)}
+          </Text>
         </View>
 
-        {/* Pattern tag */}
-        {unit.pattern && tint && (
-          <Text style={[itemStyles.patternTag, { color: tint.text }]}>
-            {unit.pattern.title}{'  ·  '}{stateLabel(unit.pattern.state, unit.pattern.trend)}
+        {/* Single metadata line */}
+        {metaLine ? (
+          <Text style={[
+            itemStyles.metaLine,
+            unit.pattern ? itemStyles.metaLinePattern : itemStyles.metaLineContext,
+          ]}>
+            {metaLine}
           </Text>
-        )}
+        ) : null}
 
-        {/* Context */}
-        {unit.context && unit.context.signals.length > 0 && (
-          <Text style={itemStyles.context}>
-            {unit.context.signals.join('  ·  ')}
-          </Text>
-        )}
+        {/* User's past reflection — reframed gently */}
+        {reflectionNote ? (
+          <Text style={itemStyles.reflectionNote}>{reflectionNote}</Text>
+        ) : null}
 
-        {/* Time context */}
-        {unit.time_context && (
-          <Text style={itemStyles.timeLabel}>
-            {unit.time_context.label.charAt(0).toUpperCase() + unit.time_context.label.slice(1)}
-            {unit.time_context.source === 'user' ? '  ·  you labeled this' : ''}
-          </Text>
-        )}
-
-        {/* Reflection — answered */}
-        {unit.reflection?.status === 'answered' && unit.reflection.answer && (
-          <Text style={itemStyles.reflectionAnswered}>
-            You said: "{unit.reflection.answer}"
-          </Text>
-        )}
-
-        {/* Reflection — ask */}
-        {unit.reflection?.status === 'ask' && unit.reflection.question && (
+        {/* Pending reflection prompt */}
+        {unit.reflection?.status === 'ask' && unit.reflection.question ? (
           <ReflectionAskButton question={unit.reflection.question} />
-        )}
+        ) : null}
 
-        {/* Bottom spacing */}
         <View style={itemStyles.spacer} />
       </View>
     </View>
@@ -179,83 +156,84 @@ const itemStyles = StyleSheet.create({
   },
 
   // Left rail
-  lineCol: {
-    width: 24,
+  rail: {
+    width: 20,
     alignItems: 'center',
   },
   dot: {
-    width: 7,
-    height: 7,
-    borderRadius: 4,
-    marginTop: 6,
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    marginTop: 7,
   },
   line: {
     flex: 1,
     width: 1,
     backgroundColor: colors.divider,
-    marginTop: 4,
+    marginTop: 5,
   },
 
   // Content
   body: {
     flex: 1,
-    paddingLeft: 12,
-    paddingBottom: 0,
+    paddingLeft: 14,
   },
   spacer: {
-    height: 36,
+    height: 32,
   },
 
   txRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'flex-start',
-    marginBottom: 8,
+    gap: 12,
+    marginBottom: 5,
   },
   merchant: {
     flex: 1,
-    fontSize: typography.body,
+    fontFamily: fonts.sans,
+    fontSize: typography.subhead,
     fontWeight: typography.weights.medium,
     color: colors.textPrimary,
-    marginRight: 12,
   },
   amount: {
-    fontSize: typography.body,
+    fontFamily: fonts.sans,
+    fontSize: typography.subhead,
+    fontWeight: typography.weights.regular,
     color: colors.textSecondary,
+  },
+  amountCredit: {
+    color: colors.accent,
+  },
+
+  // Single meta line — two variants
+  metaLine: {
+    fontFamily: fonts.sans,
+    fontSize: typography.footnote,
+    marginBottom: 3,
+  },
+  metaLinePattern: {
+    color: colors.accent,       // sage — pattern tag
+    fontWeight: typography.weights.regular,
+  },
+  metaLineContext: {
+    color: colors.textTertiary, // muted — generic signal
     fontWeight: typography.weights.regular,
   },
 
-  patternTag: {
-    fontSize: typography.footnote,
-    fontWeight: typography.weights.medium,
-    marginBottom: 6,
-    letterSpacing: 0.1,
-  },
-  context: {
+  // Reflection
+  reflectionNote: {
+    fontFamily: fonts.sans,
     fontSize: typography.footnote,
     color: colors.textTertiary,
-    marginBottom: 5,
-    lineHeight: typography.footnote * 1.5,
-  },
-  timeLabel: {
-    fontSize: typography.caption,
-    color: colors.textTertiary,
-    marginBottom: 5,
-    textTransform: 'capitalize',
-  },
-
-  reflectionAnswered: {
-    fontSize: typography.footnote,
-    color: colors.textSecondary,
     fontStyle: 'italic',
     lineHeight: typography.footnote * 1.6,
-    marginTop: 2,
+    marginTop: 3,
   },
   reflectionAsk: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginTop: 6,
     paddingVertical: 10,
     paddingHorizontal: 14,
     backgroundColor: colors.backgroundSecondary,
@@ -263,12 +241,14 @@ const itemStyles = StyleSheet.create({
   },
   reflectionAskText: {
     flex: 1,
+    fontFamily: fonts.sans,
     fontSize: typography.footnote,
     color: colors.textSecondary,
     lineHeight: typography.footnote * 1.5,
     marginRight: 10,
   },
   reflectionAskCta: {
+    fontFamily: fonts.sans,
     fontSize: typography.footnote,
     color: colors.accent,
     fontWeight: typography.weights.medium,
@@ -308,11 +288,7 @@ export default function TimelineScreen() {
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
         refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={onRefresh}
-            tintColor={colors.textTertiary}
-          />
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.textTertiary} />
         }
       >
         {loading ? (
@@ -328,12 +304,13 @@ export default function TimelineScreen() {
           </View>
         ) : (
           <>
-            {groups.reduce<{ gi: number; acc: React.ReactNode[]; counter: number }>(
+            {groups.reduce<{ acc: React.ReactNode[]; counter: number }>(
               ({ acc, counter }, { key, label, units }, gi) => {
                 const isLastGroup = gi === groups.length - 1;
                 let c = counter;
                 acc.push(
                   <View key={key} style={styles.group}>
+                    {/* Sentence case — no all-caps */}
                     <Text style={styles.dateLabel}>{label}</Text>
                     <View style={styles.entries}>
                       {units.map((unit, i) => (
@@ -347,9 +324,9 @@ export default function TimelineScreen() {
                     </View>
                   </View>
                 );
-                return { acc, counter: c, gi };
+                return { acc, counter: c };
               },
-              { acc: [], counter: 0, gi: 0 }
+              { acc: [], counter: 0 }
             ).acc}
           </>
         )}
@@ -366,13 +343,14 @@ const styles = StyleSheet.create({
     paddingBottom: 10,
   },
   pageTitle: {
-    fontSize: typography.largeTitle,
-    fontWeight: typography.weights.semibold,
+    fontFamily: fonts.serif,
+    fontSize: typography.title1,
+    fontWeight: typography.weights.regular,
     color: colors.textPrimary,
-    letterSpacing: -0.5,
   },
   scroll: { flex: 1 },
   content: { paddingBottom: 80 },
+
   loadingBlock: {
     height: 200,
     alignItems: 'center',
@@ -384,30 +362,33 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   emptyTitle: {
+    fontFamily: fonts.sans,
     fontSize: typography.headline,
-    fontWeight: typography.weights.medium,
+    fontWeight: typography.weights.regular,
     color: colors.textSecondary,
     marginBottom: 8,
   },
   emptyBody: {
+    fontFamily: fonts.sans,
     fontSize: typography.subhead,
     color: colors.textTertiary,
     textAlign: 'center',
     lineHeight: typography.subhead * 1.6,
     fontWeight: typography.weights.light,
   },
+
   group: {
     paddingHorizontal: 24,
     marginBottom: 8,
   },
   dateLabel: {
+    // Sentence case — dateKeyToLabel already capitalizes correctly
+    fontFamily: fonts.sans,
     fontSize: typography.caption,
-    fontWeight: typography.weights.medium,
+    fontWeight: typography.weights.regular,
     color: colors.textTertiary,
-    letterSpacing: 0.8,
-    textTransform: 'uppercase',
     marginBottom: 20,
-    marginLeft: 24,
+    marginLeft: 20, // aligns with content, past the rail
   },
   entries: {},
 });

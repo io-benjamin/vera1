@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { Pool } from 'pg';
 import Anthropic from '@anthropic-ai/sdk';
+import { createHash } from 'crypto';
 import { authMiddleware } from '../middleware/auth';
 import { Transaction, DetectedHabit, SpendingPersonality } from '../models/types';
 
@@ -23,56 +24,78 @@ const anthropic = new Anthropic({
  * - Provide actionable advice
  * - Focus on patterns, not individual purchases
  */
-const COACH_SYSTEM_PROMPT = `You are a supportive financial friend helping someone understand their spending.
+const COACH_SYSTEM_PROMPT = `You are writing a behavioral spending analysis for a financial intelligence app called Vera.
 
-Your personality:
-- Warm and encouraging, like a good friend who happens to be great with money
-- Non-judgmental - you understand that life happens and spending isn't always perfect
-- Celebrate wins genuinely, no matter how small
-- Gentle with setbacks - acknowledge them without making the person feel bad
-- Direct but kind - you tell the truth, but with empathy
+ROLE: Observer, not advisor. You describe what you see — you do not prescribe what to do.
 
-Your analysis approach:
-- Reference specific merchants by name (e.g., "You spent $47 at Starbucks 8 times this month")
-- Focus on patterns, not individual purchases
-- Identify spending triggers (time of day, day of week, emotional states)
-- Suggest practical alternatives, not just "stop spending"
-- Frame savings in terms of goals they might have
+TONE:
+- Calm and neutral
+- Observational and interpretive
+- Human, not clinical
+- Never alarming, never cheerleading
 
-Response format (JSON):
+STRICT RULES:
+- Do NOT give advice or suggestions
+- Do NOT say "you should", "try to", "consider", "I recommend"
+- Do NOT use words like: "alert", "warning", "concerning", "significantly", "great job"
+- Do NOT moralize about spending
+- Reference specific merchants by name when available (e.g., "Starbucks appeared 8 times")
+
+PREFERRED PHRASES:
+- "It looks like..."
+- "There's a pattern here..."
+- "This tends to happen when..."
+- "Most of the activity..."
+- "This week..."
+
+GOOD EXAMPLE for a pattern description:
+"Starbucks appeared 8 times this month — most of them before 9am. This tends to be a morning anchor, not just a coffee habit."
+
+BAD EXAMPLE:
+"You spend too much on coffee. You should consider making coffee at home to save money."
+
+Return valid JSON matching this structure exactly:
 {
-  "greeting": "A warm, personalized greeting acknowledging something specific from their data",
+  "greeting": "One sentence interpreting the overall shape of their month — specific, not generic",
   "spending_summary": {
     "total_this_month": <number>,
     "top_merchants": [{"name": "Merchant", "amount": <number>, "count": <number>}],
-    "insight": "One sentence about their overall spending pattern"
+    "insight": "One sentence describing the dominant behavioral pattern this month"
   },
   "patterns_found": [
     {
-      "title": "Short title for the pattern",
-      "description": "What you noticed, with specific numbers and merchant names",
-      "impact": "How much this costs them monthly/yearly",
-      "suggestion": "A friendly, practical suggestion"
+      "title": "Short pattern name (3–5 words)",
+      "description": "What you observed — specific numbers, merchants, timing. No advice.",
+      "impact": "Monthly cost as a number only, e.g. '$140/month'",
+      "suggestion": ""
     }
   ],
-  "wins": ["List any positive patterns or improvements you notice"],
+  "wins": ["One observation of something consistent or stable — not praise, just a neutral note"],
   "focus_area": {
-    "title": "One thing to focus on this week",
-    "why": "Why this matters",
-    "action": "Specific action to take"
+    "title": "The most prominent behavior this month",
+    "why": "Why this pattern tends to emerge — behavioral context, not judgment",
+    "action": ""
   },
-  "encouragement": "A warm closing message that motivates without being cheesy"
+  "encouragement": "One quiet closing observation about what the data says overall"
 }`;
+
+/** Build a fingerprint from the current data state so we know when to regenerate */
+function buildFingerprint(transactions: Transaction[], habits: DetectedHabit[]): string {
+  const latestTxDate = transactions[0]?.date ?? 'none';
+  const habitState = habits.map((h) => `${h.id}:${h.trend}`).sort().join('|');
+  return createHash('md5')
+    .update(`${transactions.length}:${latestTxDate}:${habitState}`)
+    .digest('hex');
+}
 
 /**
  * GET /api/analysis
- * Get comprehensive AI analysis of spending patterns
+ * Returns cached analysis if data hasn't changed; calls Claude only when needed.
  */
 router.get('/', authMiddleware(pool), async (req: Request, res: Response) => {
   try {
     const userId = req.userId!;
 
-    // Gather all data in parallel
     const [transactions, habits, personality] = await Promise.all([
       getRecentTransactions(userId, 30),
       getUserHabits(userId),
@@ -93,60 +116,69 @@ router.get('/', authMiddleware(pool), async (req: Request, res: Response) => {
       });
     }
 
-    // Build context for AI
+    const fingerprint = buildFingerprint(transactions, habits);
+
+    // Return cached analysis if the data state hasn't changed
+    const cached = await pool.query<{ analysis_json: any }>(
+      `SELECT analysis_json FROM analysis_cache
+       WHERE user_id = $1 AND fingerprint = $2
+       ORDER BY created_at DESC LIMIT 1`,
+      [userId, fingerprint]
+    );
+
+    if (cached.rows.length > 0) {
+      return res.json({
+        ...cached.rows[0].analysis_json,
+        cached: true,
+      });
+    }
+
+    // Nothing cached — call Claude
     const context = buildAnalysisContext(transactions, habits, personality);
+    let analysis: any;
 
     try {
       const response = await anthropic.messages.create({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 2000,
         system: COACH_SYSTEM_PROMPT,
-        messages: [
-          {
-            role: 'user',
-            content: `Please analyze this spending data and provide insights:\n\n${context}`,
-          },
-        ],
+        messages: [{ role: 'user', content: `Please analyze this spending data and provide insights:\n\n${context}` }],
       });
 
       const textContent = response.content.find((block) => block.type === 'text');
-      if (!textContent || textContent.type !== 'text') {
-        throw new Error('No text response from AI');
-      }
-
-      const analysis = parseAIResponse(textContent.text);
-
-      res.json({
-        analysis,
-        has_enough_data: true,
-        data_points: {
-          transaction_count: transactions.length,
-          habits_detected: habits.length,
-          personality_type: personality?.primary_type || null,
-        },
-      });
+      if (!textContent || textContent.type !== 'text') throw new Error('No text response from AI');
+      analysis = parseAIResponse(textContent.text);
     } catch (aiError) {
       console.error('AI analysis error:', aiError);
-
-      // Return fallback analysis
-      res.json({
-        analysis: generateFallbackAnalysis(transactions, habits, personality),
-        has_enough_data: true,
-        fallback: true,
-      });
+      analysis = generateFallbackAnalysis(transactions, habits, personality);
     }
+
+    const payload = {
+      analysis,
+      has_enough_data: true,
+      data_points: {
+        transaction_count: transactions.length,
+        habits_detected: habits.length,
+        personality_type: personality?.primary_type ?? null,
+      },
+    };
+
+    // Persist so next load is instant
+    await pool.query(
+      `INSERT INTO analysis_cache (user_id, fingerprint, analysis_json) VALUES ($1, $2, $3)`,
+      [userId, fingerprint, JSON.stringify(payload)]
+    ).catch((err) => console.error('Failed to cache analysis:', err));
+
+    res.json(payload);
   } catch (error) {
     console.error('Error in analysis route:', error);
-    res.status(500).json({
-      message: 'Failed to generate analysis',
-      error: error instanceof Error ? error.message : 'Unknown error',
-    });
+    res.status(500).json({ message: 'Failed to generate analysis', error: error instanceof Error ? error.message : 'Unknown error' });
   }
 });
 
 /**
  * POST /api/analysis/refresh
- * Force refresh AI analysis (regenerate)
+ * Force-regenerate analysis and replace the cache.
  */
 router.post('/refresh', authMiddleware(pool), async (req: Request, res: Response) => {
   try {
@@ -159,10 +191,7 @@ router.post('/refresh', authMiddleware(pool), async (req: Request, res: Response
     ]);
 
     if (transactions.length < 5) {
-      return res.json({
-        analysis: null,
-        message: 'Not enough transaction data for analysis',
-      });
+      return res.json({ analysis: null, message: 'Not enough transaction data for analysis' });
     }
 
     const context = buildAnalysisContext(transactions, habits, personality);
@@ -171,31 +200,36 @@ router.post('/refresh', authMiddleware(pool), async (req: Request, res: Response
       model: 'claude-sonnet-4-20250514',
       max_tokens: 2000,
       system: COACH_SYSTEM_PROMPT,
-      messages: [
-        {
-          role: 'user',
-          content: `Please analyze this spending data and provide fresh insights:\n\n${context}`,
-        },
-      ],
+      messages: [{ role: 'user', content: `Please analyze this spending data and provide fresh insights:\n\n${context}` }],
     });
 
     const textContent = response.content.find((block) => block.type === 'text');
-    if (!textContent || textContent.type !== 'text') {
-      throw new Error('No text response from AI');
-    }
+    if (!textContent || textContent.type !== 'text') throw new Error('No text response from AI');
 
     const analysis = parseAIResponse(textContent.text);
-
-    res.json({
+    const fingerprint = buildFingerprint(transactions, habits);
+    const payload = {
       analysis,
+      has_enough_data: true,
       refreshed_at: new Date().toISOString(),
-    });
+      data_points: {
+        transaction_count: transactions.length,
+        habits_detected: habits.length,
+        personality_type: personality?.primary_type ?? null,
+      },
+    };
+
+    // Delete old cache entries and write the fresh one
+    await pool.query(`DELETE FROM analysis_cache WHERE user_id = $1`, [userId]);
+    await pool.query(
+      `INSERT INTO analysis_cache (user_id, fingerprint, analysis_json) VALUES ($1, $2, $3)`,
+      [userId, fingerprint, JSON.stringify(payload)]
+    );
+
+    res.json(payload);
   } catch (error) {
     console.error('Error refreshing analysis:', error);
-    res.status(500).json({
-      message: 'Failed to refresh analysis',
-      error: error instanceof Error ? error.message : 'Unknown error',
-    });
+    res.status(500).json({ message: 'Failed to refresh analysis', error: error instanceof Error ? error.message : 'Unknown error' });
   }
 });
 
@@ -271,63 +305,67 @@ function buildAnalysisContext(
   habits: DetectedHabit[],
   personality: SpendingPersonality | null
 ): string {
-  // Calculate spending by merchant
-  const merchantTotals = new Map<string, { amount: number; count: number }>();
-  const categoryTotals = new Map<string, number>();
-  let totalSpent = 0;
+  const spending = transactions.filter((t) => t.amount > 0);
+  const totalSpent = spending.reduce((s, t) => s + t.amount, 0);
 
-  for (const tx of transactions) {
-    if (tx.amount > 0) {
-      const amount = tx.amount;
-      totalSpent += amount;
+  // Merchant breakdown
+  const merchantMap = new Map<string, { amount: number; count: number }>();
+  const categoryMap = new Map<string, { amount: number; count: number }>();
 
-      const merchant = tx.merchant_name || tx.name;
-      const existing = merchantTotals.get(merchant) || { amount: 0, count: 0 };
-      merchantTotals.set(merchant, {
-        amount: existing.amount + amount,
-        count: existing.count + 1,
-      });
+  for (const tx of spending) {
+    const merchant = tx.merchant_name || tx.name;
+    const m = merchantMap.get(merchant) ?? { amount: 0, count: 0 };
+    merchantMap.set(merchant, { amount: m.amount + tx.amount, count: m.count + 1 });
 
-      const cat = tx.category || 'OTHER';
-      categoryTotals.set(cat, (categoryTotals.get(cat) || 0) + amount);
-    }
+    const cat = tx.category || 'Other';
+    const c = categoryMap.get(cat) ?? { amount: 0, count: 0 };
+    categoryMap.set(cat, { amount: c.amount + tx.amount, count: c.count + 1 });
   }
 
-  // Sort merchants by amount
-  const topMerchants = Array.from(merchantTotals.entries())
+  const topMerchants = [...merchantMap.entries()]
     .sort((a, b) => b[1].amount - a[1].amount)
-    .slice(0, 10);
+    .slice(0, 8);
 
-  // Sort categories by amount
-  const topCategories = Array.from(categoryTotals.entries())
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 5);
+  const topCategories = [...categoryMap.entries()]
+    .sort((a, b) => b[1].amount - a[1].amount)
+    .slice(0, 5)
+    .map(([cat, d]) => ({
+      cat,
+      pct: Math.round((d.amount / totalSpent) * 100),
+      count: d.count,
+    }));
 
-  // Build time pattern analysis
-  const timePatterns = analyzeTimePatterns(transactions);
+  // Time patterns
+  const { weekendPercent: weekendPct, lateNightPercent: lateNightPct, highestDay } = analyzeTimePatterns(transactions);
 
-  return `SPENDING OVERVIEW (Last 30 Days):
-- Total Spent: $${totalSpent.toFixed(2)}
-- Transaction Count: ${transactions.length}
+  // Habit signals
+  const habitSignals = habits.map((h) => ({
+    name: h.title,
+    monthly: `$${h.monthly_impact.toFixed(0)}/mo`,
+    trend: h.trend,
+    occurrences: h.occurrence_count,
+  }));
 
-TOP MERCHANTS (by spend):
-${topMerchants.map(([name, data]) => `- ${name}: $${data.amount.toFixed(2)} (${data.count} transactions)`).join('\n')}
+  return `PERIOD: Last 30 days
+TOTAL SPENT: $${totalSpent.toFixed(0)} across ${spending.length} transactions
 
-TOP CATEGORIES:
-${topCategories.map(([cat, amount]) => `- ${cat}: $${amount.toFixed(2)}`).join('\n')}
+TOP MERCHANTS:
+${topMerchants.map(([name, d]) => `  ${name} — $${d.amount.toFixed(0)} (${d.count}×)`).join('\n')}
 
-TIME PATTERNS:
-- Weekend spending: $${timePatterns.weekendSpend.toFixed(2)} (${timePatterns.weekendPercent.toFixed(0)}% of total)
-- Late night (9pm-2am): $${timePatterns.lateNightSpend.toFixed(2)} (${timePatterns.lateNightPercent.toFixed(0)}% of total)
-- Highest spend day: ${timePatterns.highestDay}
+CATEGORY BREAKDOWN:
+${topCategories.map((c) => `  ${c.cat} — ${c.pct}% of spend (${c.count} transactions)`).join('\n')}
 
-DETECTED HABITS:
-${habits.length > 0 ? habits.map((h) => `- ${h.title}: $${h.monthly_impact.toFixed(2)}/month (${h.frequency})`).join('\n') : 'No habits detected yet'}
+TIME SIGNALS:
+  Weekend activity: ${weekendPct}% of transactions
+  Late-night activity (after 9pm): ${lateNightPct}% of transactions
+  Highest-spend day: ${highestDay}
 
-SPENDING PERSONALITY: ${personality ? personality.primary_type : 'Not analyzed yet'}
+DETECTED BEHAVIORAL PATTERNS:
+${habitSignals.length > 0
+  ? habitSignals.map((h) => `  ${h.name} — ${h.monthly} — ${h.trend} — ${h.occurrences} occurrences`).join('\n')
+  : '  None detected yet'}
 
-RECENT TRANSACTIONS (last 15):
-${transactions.slice(0, 15).map((t) => `${t.date}: ${t.merchant_name || t.name} - $${Math.abs(t.amount).toFixed(2)} (${t.category || 'OTHER'})`).join('\n')}`;
+SPENDING PERSONALITY TYPE: ${personality?.primary_type ?? 'Not yet classified'}`;
 }
 
 function analyzeTimePatterns(transactions: Transaction[]): {
@@ -404,7 +442,7 @@ function parseAIResponse(text: string): any {
 function generateFallbackAnalysis(
   transactions: Transaction[],
   habits: DetectedHabit[],
-  personality: SpendingPersonality | null
+  _personality: SpendingPersonality | null
 ): any {
   const totalSpent = transactions
     .filter((t) => t.amount > 0)

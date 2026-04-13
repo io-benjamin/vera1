@@ -2,6 +2,14 @@ import { Router } from 'express';
 import { Pool } from 'pg';
 import { AuthService } from '../services/authService';
 import { authMiddleware } from '../middleware/auth';
+import { validateBody } from '../middleware/validate';
+import { sensitiveLimiter } from '../middleware/rateLimiter';
+import {
+  registerSchema,
+  loginSchema,
+  changePasswordSchema,
+  updateProfileSchema,
+} from '../validators/auth.validators';
 
 const router = Router();
 const pool = new Pool({
@@ -14,31 +22,9 @@ const authService = new AuthService(pool);
  * POST /api/auth/register
  * Register a new user
  */
-router.post('/register', async (req, res) => {
+router.post('/register', sensitiveLimiter, validateBody(registerSchema), async (req, res) => {
   try {
     const { email, password, first_name, last_name } = req.body;
-
-    // Validate required fields
-    if (!email || !password) {
-      return res.status(400).json({
-        error: 'Email and password are required'
-      });
-    }
-
-    // Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
-      return res.status(400).json({
-        error: 'Invalid email format'
-      });
-    }
-
-    // Validate password strength
-    if (password.length < 8) {
-      return res.status(400).json({
-        error: 'Password must be at least 8 characters long'
-      });
-    }
 
     const result = await authService.register({
       email,
@@ -65,16 +51,9 @@ router.post('/register', async (req, res) => {
  * POST /api/auth/login
  * Login user
  */
-router.post('/login', async (req, res) => {
+router.post('/login', sensitiveLimiter, validateBody(loginSchema), async (req, res) => {
   try {
     const { email, password } = req.body;
-
-    // Validate required fields
-    if (!email || !password) {
-      return res.status(400).json({
-        error: 'Email and password are required'
-      });
-    }
 
     const result = await authService.login({ email, password });
 
@@ -117,16 +96,9 @@ router.get('/me', authMiddleware(pool), async (req, res) => {
  * PATCH /api/auth/profile
  * Update user profile
  */
-router.patch('/profile', authMiddleware(pool), async (req, res) => {
+router.patch('/profile', authMiddleware(pool), validateBody(updateProfileSchema), async (req, res) => {
   try {
-    const { first_name, last_name, phone, preferred_language } = req.body;
-
-    const updates: any = {};
-    if (first_name !== undefined) updates.first_name = first_name;
-    if (last_name !== undefined) updates.last_name = last_name;
-    if (phone !== undefined) updates.phone = phone;
-    if (preferred_language !== undefined) updates.preferred_language = preferred_language;
-
+    const updates = req.body;
     const updatedUser = await authService.updateProfile(req.userId!, updates);
 
     res.json(updatedUser);
@@ -147,22 +119,9 @@ router.patch('/profile', authMiddleware(pool), async (req, res) => {
  * POST /api/auth/change-password
  * Change user password
  */
-router.post('/change-password', authMiddleware(pool), async (req, res) => {
+router.post('/change-password', authMiddleware(pool), validateBody(changePasswordSchema), async (req, res) => {
   try {
     const { current_password, new_password } = req.body;
-
-    if (!current_password || !new_password) {
-      return res.status(400).json({
-        error: 'Current password and new password are required'
-      });
-    }
-
-    if (new_password.length < 8) {
-      return res.status(400).json({
-        error: 'New password must be at least 8 characters long'
-      });
-    }
-
     await authService.changePassword(req.userId!, current_password, new_password);
 
     res.json({ message: 'Password changed successfully' });

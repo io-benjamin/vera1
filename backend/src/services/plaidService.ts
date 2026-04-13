@@ -237,7 +237,10 @@ export async function syncTransactions(
         continue;
       }
 
-      const category = mapCategory(tx.personal_finance_category?.primary || tx.category?.[0]);
+      const rawCategory = mapCategory(tx.personal_finance_category?.primary || tx.category?.[0]);
+      const category = rawCategory === 'OTHER'
+        ? (inferCategoryFromMerchant(tx.merchant_name || tx.name) ?? 'OTHER')
+        : rawCategory;
 
       const qualityScore = dqService.scoreSingleTransaction({
         is_pending: tx.pending,
@@ -400,4 +403,33 @@ function mapCategory(plaidCategory: string | undefined): string {
   };
 
   return categoryMap[plaidCategory] || 'OTHER';
+}
+
+/**
+ * Infer a meaningful category from merchant name when Plaid returns OTHER.
+ * Returns null if no match — caller keeps 'OTHER'.
+ */
+export function inferCategoryFromMerchant(merchantName: string | undefined): string | null {
+  if (!merchantName) return null;
+  const m = merchantName.toLowerCase();
+
+  if (/starbucks|dunkin|tim hortons|peet|coffee|boba|tea house/.test(m)) return 'FOOD';
+  if (/mcdonald|chick-fil|burger king|wendy|taco bell|chipotle|subway|domino|pizza|kfc|popeyes|shake shack|five guys|whataburger/.test(m)) return 'FOOD';
+  if (/uber eats|doordash|grubhub|postmates|instacart|gopuff|caviar|seamless|door dash/.test(m)) return 'FOOD';
+  if (/whole foods|trader joe|safeway|kroger|publix|aldi|sprouts|heb|wegmans|food lion|giant|stop.?shop|market basket/.test(m)) return 'FOOD';
+  if (/lyft|uber(?! eats)|bird|lime|citibike|metro|transit|bart|mta|cta|caltra|amtrak|greyhound/.test(m)) return 'TRANSPORTATION';
+  if (/netflix|hulu|disney\+|hbo|max|peacock|paramount|apple tv|youtube premium|crunchyroll|twitch/.test(m)) return 'ENTERTAINMENT';
+  if (/spotify|apple music|tidal|pandora|soundcloud/.test(m)) return 'ENTERTAINMENT';
+  if (/steam|playstation|xbox|nintendo|epic games|riot games|blizzard|ea games/.test(m)) return 'ENTERTAINMENT';
+  if (/capcut|adobe|figma|canva|notion|sketch|invision|miro|loom|grammarly/.test(m)) return 'SHOPPING';
+  if (/amazon|target|walmart|costco|best buy|home depot|lowes|ikea|wayfair|overstock/.test(m)) return 'SHOPPING';
+  if (/zara|h&m|forever 21|gap|old navy|uniqlo|nordstrom|macy|tjmaxx|marshalls|ross/.test(m)) return 'SHOPPING';
+  if (/cvs|walgreens|rite aid|duane reade|boots|vitamin shoppe/.test(m)) return 'HEALTHCARE';
+  if (/planet fitness|equinox|la fitness|crunch|orange theory|anytime fitness|ymca/.test(m)) return 'HEALTHCARE';
+  if (/at&t|verizon|t-mobile|sprint|comcast|xfinity|spectrum|cox|directv|dish/.test(m)) return 'BILLS';
+  if (/electric|gas company|water utility|pg&e|con ed|duke energy/.test(m)) return 'BILLS';
+  if (/airbnb|vrbo|marriott|hilton|hyatt|wyndham|holiday inn|expedia|hotels\.com|booking\.com/.test(m)) return 'TRAVEL';
+  if (/venmo|zelle|cash ?app|paypal|wire transfer|bank transfer/.test(m)) return 'TRANSFER';
+
+  return null;
 }

@@ -5,40 +5,40 @@
 
 export const colors = {
   // Backgrounds
-  background: '#FFFFFF',
-  backgroundSecondary: '#F8F9FA',
-  backgroundTertiary: '#F1F3F4',
+  background:          '#F5F3EF',
+  backgroundSecondary: '#EDE9E2',
+  backgroundTertiary:  '#E4DFD8',
 
   // Text
-  textPrimary: '#1A1A1A',
-  textSecondary: '#6B7280',
-  textTertiary: '#9CA3AF',
+  textPrimary:   '#2C1A10',
+  textSecondary: '#6B5744',
+  textTertiary:  '#9E8C80',
 
-  // Accent
-  accent: '#000000',
-  accentLight: '#374151',
+  // Accent — muted sage green
+  accent:      '#5C7A62',
+  accentLight: '#E8F0E9',
 
-  // Discipline Score Colors
+  // Discipline Score Colors (kept for backward compat)
   discipline: {
-    excellent: '#10B981', // Green
-    good: '#34D399',      // Light green
-    average: '#FBBF24',   // Yellow
-    poor: '#F87171',      // Light red
-    bad: '#991B1B',       // Dark red
+    excellent: '#5C7A62',
+    good:      '#7A9E7E',
+    average:   '#A08A4A',
+    poor:      '#9E6B5B',
+    bad:       '#7A3B2E',
   },
 
   // Status
-  success: '#10B981',
-  warning: '#F59E0B',
-  error: '#EF4444',
+  success: '#5C7A62',
+  warning: '#A08A4A',
+  error:   '#9E6B5B',
 
   // Borders & Dividers
-  border: '#E5E7EB',
-  divider: '#F3F4F6',
+  border:  '#DDD8D0',
+  divider: '#E8E3DB',
 
   // Cards
-  card: '#FFFFFF',
-  cardShadow: 'rgba(0, 0, 0, 0.04)',
+  card:       '#FDFCFA',
+  cardShadow: 'rgba(44, 26, 16, 0.08)',
 };
 
 export const typography = {

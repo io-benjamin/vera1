@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Modal,
@@ -10,14 +10,15 @@ import {
   Text,
   View,
 } from 'react-native';
+import { useRoute, RouteProp, useFocusEffect } from '@react-navigation/native';
 import * as api from '../services/api';
 import { colors } from '../theme/colors';
-import { typography } from '../theme/typography';
+import { fonts, typography } from '../theme/typography';
 import { AIHabitInsight, DetectedHabit } from '../types';
 import PatternRow from '../components/PatternRow';
-import ScoreBar from '../components/ScoreBar';
 import { TrendDirection } from '../types/behavior';
 import { FadeInView } from '../components/FadeInView';
+import { TabParamList } from '../navigation/AppNavigator';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -35,7 +36,294 @@ function toTrend(raw: string | null): TrendDirection {
   return 'stable';
 }
 
-// ─── Detail sheet (full-screen modal) ────────────────────────────────────────
+// ─── Spending style derivation ────────────────────────────────────────────────
+
+const IMPULSE_TYPES  = new Set(['IMPULSE_PURCHASE', 'BINGE_SHOPPING', 'POST_PAYDAY_SURGE']);
+const EMOTIONAL_TYPES = new Set(['COMFORT_SPENDING', 'STRESS_SPENDING_DAY']);
+const HABITUAL_TYPES  = new Set(['RECURRING_INDULGENCE', 'WEEKLY_RITUAL', 'CAFFEINE_RITUAL', 'MEAL_DELIVERY_HABIT', 'FOOD_DELIVERY_DEPENDENCY']);
+
+function deriveStyle(habits: DetectedHabit[]): { label: string; description: string } {
+  const types = habits.map((h) => h.habit_type);
+  const emotional = types.filter((t) => EMOTIONAL_TYPES.has(t)).length;
+  const impulse   = types.filter((t) => IMPULSE_TYPES.has(t)).length;
+  const habitual  = types.filter((t) => HABITUAL_TYPES.has(t)).length;
+
+  if (emotional >= 1)  return { label: 'Emotionally-linked', description: 'Spending tends to follow emotional states more than fixed routines or categories.' };
+  if (impulse >= 2)    return { label: 'Impulse-driven',     description: 'Spending often happens in brief windows of low resistance, outside of planned moments.' };
+  if (habitual >= 2)   return { label: 'Habitual',           description: 'Most spending follows predictable routines — the same merchants, times, and amounts.' };
+  if (habits.length === 0) return { label: 'Still learning', description: 'Not enough data yet to characterize a style. More transactions will surface patterns.' };
+  return { label: 'Adaptive', description: 'Spending shifts based on what comes up, rather than following a fixed category pattern.' };
+}
+
+// ─── Category breakdown derivation ───────────────────────────────────────────
+
+const HABIT_BUCKET: Record<string, string> = {
+  MEAL_DELIVERY_HABIT:      'Food & delivery',
+  FOOD_DELIVERY_DEPENDENCY: 'Food & delivery',
+  CAFFEINE_RITUAL:          'Food & delivery',
+  RECURRING_INDULGENCE:     'Subscriptions',
+  WEEKLY_RITUAL:            'Subscriptions',
+  IMPULSE_PURCHASE:         'Shopping',
+  BINGE_SHOPPING:           'Shopping',
+  WEEKEND_SPLURGE:          'Leisure',
+  LATE_NIGHT_SPENDING:      'Late-night',
+  COMFORT_SPENDING:         'Other',
+  STRESS_SPENDING_DAY:      'Other',
+  POST_PAYDAY_SURGE:        'Other',
+};
+
+function deriveCategories(habits: DetectedHabit[]): { name: string; pct: number }[] {
+  const buckets: Record<string, number> = {};
+  let total = 0;
+  for (const h of habits) {
+    const bucket = HABIT_BUCKET[h.habit_type] ?? 'Other';
+    buckets[bucket] = (buckets[bucket] ?? 0) + h.monthly_impact;
+    total += h.monthly_impact;
+  }
+  if (total === 0) return [];
+  return Object.entries(buckets)
+    .map(([name, amount]) => ({ name, pct: Math.round((amount / total) * 100) }))
+    .sort((a, b) => b.pct - a.pct)
+    .slice(0, 4);
+}
+
+// ─── Section divider ──────────────────────────────────────────────────────────
+
+function Divider() {
+  return <View style={{ height: 1, backgroundColor: colors.divider, marginHorizontal: 24, marginVertical: 36 }} />;
+}
+
+// ─── Insight hero ─────────────────────────────────────────────────────────────
+
+function InsightHero({
+  coachingMessage,
+  analysisHeadline,
+}: {
+  coachingMessage: string | null;
+  analysisHeadline: string | null;
+}) {
+  const headline = analysisHeadline ?? 'Your spending this month';
+
+  // Break coaching message into short paragraphs if it's long
+  const paragraphs: string[] = coachingMessage
+    ? coachingMessage
+        .split(/\.\s+/)
+        .reduce<string[]>((acc, sentence, i, arr) => {
+          if (i % 2 === 0) {
+            const next = arr[i + 1];
+            acc.push(next ? `${sentence}. ${next}.` : `${sentence}.`);
+          }
+          return acc;
+        }, [])
+        .filter(Boolean)
+    : [];
+
+  return (
+    <View style={hero.container}>
+      <Text style={hero.headline}>{headline}</Text>
+      {paragraphs.map((p, i) => (
+        <Text key={i} style={hero.body}>{p}</Text>
+      ))}
+    </View>
+  );
+}
+
+const hero = StyleSheet.create({
+  container: { paddingHorizontal: 24, paddingTop: 28, paddingBottom: 8 },
+  headline: {
+    fontFamily: fonts.serif,
+    fontSize: typography.title2,
+    fontWeight: typography.weights.regular,
+    color: colors.textPrimary,
+    lineHeight: typography.title2 * 1.35,
+    marginBottom: 16,
+  },
+  body: {
+    fontFamily: fonts.sans,
+    fontSize: typography.subhead,
+    fontWeight: typography.weights.light,
+    color: colors.textSecondary,
+    lineHeight: typography.subhead * 1.75,
+    marginBottom: 10,
+  },
+});
+
+// ─── Spending style ───────────────────────────────────────────────────────────
+
+function SpendingStyle({ label, description }: { label: string; description: string }) {
+  return (
+    <View style={styleSection.container}>
+      <Text style={styleSection.sectionLabel}>Spending style</Text>
+      <Text style={styleSection.label}>{label}</Text>
+      <Text style={styleSection.description}>{description}</Text>
+    </View>
+  );
+}
+
+const styleSection = StyleSheet.create({
+  container: { paddingHorizontal: 24 },
+  sectionLabel: {
+    fontFamily: fonts.sans,
+    fontSize: typography.caption,
+    fontWeight: typography.weights.regular,
+    color: colors.textTertiary,
+    marginBottom: 10,
+    letterSpacing: 0.3,
+  },
+  label: {
+    fontFamily: fonts.serif,
+    fontSize: typography.title3,
+    fontWeight: typography.weights.regular,
+    color: colors.textPrimary,
+    marginBottom: 8,
+  },
+  description: {
+    fontFamily: fonts.sans,
+    fontSize: typography.subhead,
+    fontWeight: typography.weights.light,
+    color: colors.textSecondary,
+    lineHeight: typography.subhead * 1.7,
+  },
+});
+
+// ─── Recurring behavior ───────────────────────────────────────────────────────
+
+function RecurringBehavior({
+  habits,
+  onPress,
+}: {
+  habits: DetectedHabit[];
+  onPress: (h: DetectedHabit) => void;
+}) {
+  const totalImpact = habits.reduce((s, h) => s + h.monthly_impact, 0);
+
+  return (
+    <View style={recurring.container}>
+      <Text style={recurring.sectionLabel}>Recurring behavior</Text>
+
+      {habits.length === 0 ? (
+        <Text style={recurring.empty}>No recurring patterns detected yet.</Text>
+      ) : (
+        <>
+          <View style={recurring.list}>
+            {habits.map((h, i) => (
+              <View key={h.id}>
+                {i > 0 && <View style={recurring.divider} />}
+                <PatternRow
+                  name={h.title}
+                  description={h.description}
+                  monthlyImpact={h.monthly_impact}
+                  trend={toTrend(h.trend)}
+                  isNew={!h.is_acknowledged}
+                  onPress={() => onPress(h)}
+                />
+              </View>
+            ))}
+          </View>
+
+          <View style={recurring.totalRow}>
+            <Text style={recurring.totalLabel}>Total recurring</Text>
+            <Text style={recurring.totalValue}>{fmt(totalImpact)}/mo</Text>
+          </View>
+        </>
+      )}
+    </View>
+  );
+}
+
+const recurring = StyleSheet.create({
+  container: { paddingHorizontal: 24 },
+  sectionLabel: {
+    fontFamily: fonts.sans,
+    fontSize: typography.caption,
+    fontWeight: typography.weights.regular,
+    color: colors.textTertiary,
+    marginBottom: 4,
+    letterSpacing: 0.3,
+  },
+  list: { borderTopWidth: 1, borderTopColor: colors.divider },
+  divider: { height: 1, backgroundColor: colors.divider },
+  empty: {
+    fontSize: typography.subhead,
+    color: colors.textTertiary,
+    fontWeight: typography.weights.light,
+    lineHeight: typography.subhead * 1.6,
+    paddingTop: 12,
+  },
+  totalRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingTop: 16,
+    marginTop: 4,
+    borderTopWidth: 1,
+    borderTopColor: colors.divider,
+  },
+  totalLabel: {
+    fontSize: typography.subhead,
+    color: colors.textTertiary,
+    fontWeight: typography.weights.regular,
+    fontFamily: fonts.sans,
+  },
+  totalValue: {
+    fontSize: typography.headline,
+    fontWeight: typography.weights.semibold,
+    color: colors.textPrimary,
+    fontFamily: fonts.sans,
+  },
+});
+
+// ─── Category breakdown ───────────────────────────────────────────────────────
+
+function CategoryBreakdown({ categories }: { categories: { name: string; pct: number }[] }) {
+  if (categories.length === 0) return null;
+
+  return (
+    <View style={catStyles.container}>
+      <Text style={catStyles.sectionLabel}>Where it goes</Text>
+      {categories.map(({ name, pct }) => (
+        <View key={name} style={catStyles.row}>
+          <Text style={catStyles.name}>{name}</Text>
+          <Text style={catStyles.pct}>{pct}%</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+const catStyles = StyleSheet.create({
+  container: { paddingHorizontal: 24 },
+  sectionLabel: {
+    fontFamily: fonts.sans,
+    fontSize: typography.caption,
+    fontWeight: typography.weights.regular,
+    color: colors.textTertiary,
+    marginBottom: 12,
+    letterSpacing: 0.3,
+  },
+  row: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 11,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.divider,
+  },
+  name: {
+    fontFamily: fonts.sans,
+    fontSize: typography.subhead,
+    fontWeight: typography.weights.regular,
+    color: colors.textSecondary,
+  },
+  pct: {
+    fontFamily: fonts.sans,
+    fontSize: typography.subhead,
+    fontWeight: typography.weights.medium,
+    color: colors.textPrimary,
+  },
+});
+
+// ─── Detail sheet ─────────────────────────────────────────────────────────────
 
 interface DetailProps {
   habit: DetectedHabit | null;
@@ -47,13 +335,11 @@ interface DetailProps {
 
 function DetailSheet({ habit, insight, insightLoading, onClose, onAcknowledge }: DetailProps) {
   if (!habit) return null;
-
   const ins = insight as any;
 
   return (
     <Modal visible animationType="slide" transparent={false} onRequestClose={onClose}>
       <SafeAreaView style={sheet.safe}>
-        {/* Nav */}
         <View style={sheet.nav}>
           <Pressable onPress={onClose} hitSlop={12}>
             <Text style={sheet.navBack}>← Back</Text>
@@ -63,22 +349,15 @@ function DetailSheet({ habit, insight, insightLoading, onClose, onAcknowledge }:
           </Pressable>
         </View>
 
-        <ScrollView
-          style={sheet.scroll}
-          contentContainerStyle={sheet.content}
-          showsVerticalScrollIndicator={false}
-        >
-          {/* Title */}
+        <ScrollView style={sheet.scroll} contentContainerStyle={sheet.content} showsVerticalScrollIndicator={false}>
           <Text style={sheet.title}>{habit.title}</Text>
           <Text style={sheet.description}>{habit.description}</Text>
 
-          {/* Stats row */}
           <View style={sheet.statsRow}>
             <View style={sheet.stat}>
               <Text style={sheet.statValue}>{fmt(habit.monthly_impact)}</Text>
               <Text style={sheet.statLabel}>per month</Text>
             </View>
-            <View style={sheet.statDivider} />
             <View style={sheet.statDivider} />
             <View style={sheet.stat}>
               <Text style={sheet.statValue}>{habit.occurrence_count}</Text>
@@ -86,7 +365,6 @@ function DetailSheet({ habit, insight, insightLoading, onClose, onAcknowledge }:
             </View>
           </View>
 
-          {/* AI insight */}
           {insightLoading ? (
             <View style={sheet.loadingRow}>
               <ActivityIndicator color={colors.textTertiary} size="small" />
@@ -108,10 +386,8 @@ function DetailSheet({ habit, insight, insightLoading, onClose, onAcknowledge }:
               ) : null}
               {ins.recommended_intervention ? (
                 <View style={sheet.insightSection}>
-                  <Text style={sheet.insightLabel}>One thing to try</Text>
-                  <Text style={[sheet.insightBody, sheet.insightAction]}>
-                    {ins.recommended_intervention}
-                  </Text>
+                  <Text style={sheet.insightLabel}>One thing to notice</Text>
+                  <Text style={[sheet.insightBody, sheet.insightAction]}>{ins.recommended_intervention}</Text>
                 </View>
               ) : null}
               {ins.potential_savings ? (
@@ -123,7 +399,6 @@ function DetailSheet({ habit, insight, insightLoading, onClose, onAcknowledge }:
             </View>
           ) : null}
 
-          {/* Sample transactions */}
           {habit.sample_transactions?.length > 0 && (
             <View style={sheet.sampleBlock}>
               <Text style={sheet.blockLabel}>Recent examples</Text>
@@ -145,7 +420,7 @@ function DetailSheet({ habit, insight, insightLoading, onClose, onAcknowledge }:
 }
 
 const sheet = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.background },
+  safe:    { flex: 1, backgroundColor: colors.background },
   nav: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -155,15 +430,15 @@ const sheet = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: colors.divider,
   },
-  navBack: { fontSize: typography.subhead, color: colors.accent, fontWeight: typography.weights.medium },
+  navBack: { fontSize: typography.subhead, color: colors.accent,       fontWeight: typography.weights.medium },
   navAck:  { fontSize: typography.subhead, color: colors.textTertiary, fontWeight: typography.weights.medium },
-  scroll: { flex: 1 },
+  scroll:  { flex: 1 },
   content: { paddingHorizontal: 24, paddingTop: 32, paddingBottom: 60 },
   title: {
+    fontFamily: fonts.serif,
     fontSize: typography.title2,
-    fontWeight: typography.weights.semibold,
+    fontWeight: typography.weights.regular,
     color: colors.textPrimary,
-    letterSpacing: -0.3,
     marginBottom: 10,
   },
   description: {
@@ -182,20 +457,19 @@ const sheet = StyleSheet.create({
     borderColor: colors.divider,
     marginBottom: 32,
   },
-  stat: { flex: 1, alignItems: 'center', gap: 4 },
-  statValue: { fontSize: typography.headline, fontWeight: typography.weights.semibold, color: colors.textPrimary },
-  statLabel: { fontSize: typography.caption, color: colors.textTertiary },
-  statDivider: { width: 1, height: 28, backgroundColor: colors.divider },
-  loadingRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 20 },
-  loadingText: { fontSize: typography.subhead, color: colors.textTertiary },
+  stat:         { flex: 1, alignItems: 'center', gap: 4 },
+  statValue:    { fontSize: typography.headline, fontWeight: typography.weights.semibold, color: colors.textPrimary },
+  statLabel:    { fontSize: typography.caption,  color: colors.textTertiary },
+  statDivider:  { width: 1, height: 28, backgroundColor: colors.divider },
+  loadingRow:   { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 20 },
+  loadingText:  { fontSize: typography.subhead, color: colors.textTertiary },
   insightBlock: { gap: 2, marginBottom: 28 },
   insightSection: { paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: colors.divider },
   insightLabel: {
+    fontFamily: fonts.sans,
     fontSize: typography.caption,
-    fontWeight: typography.weights.medium,
+    fontWeight: typography.weights.regular,
     color: colors.textTertiary,
-    letterSpacing: 0.8,
-    textTransform: 'uppercase',
     marginBottom: 6,
   },
   insightBody: {
@@ -214,50 +488,44 @@ const sheet = StyleSheet.create({
   },
   savingsLabel: { fontSize: typography.subhead, color: colors.textSecondary },
   savingsValue: { fontSize: typography.headline, fontWeight: typography.weights.semibold, color: colors.textPrimary },
-  sampleBlock: { borderTopWidth: 1, borderTopColor: colors.divider, paddingTop: 28 },
+  sampleBlock:  { borderTopWidth: 1, borderTopColor: colors.divider, paddingTop: 28 },
   blockLabel: {
+    fontFamily: fonts.sans,
     fontSize: typography.caption,
-    fontWeight: typography.weights.medium,
+    fontWeight: typography.weights.regular,
     color: colors.textTertiary,
-    letterSpacing: 0.8,
-    textTransform: 'uppercase',
     marginBottom: 12,
   },
-  txRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 13 },
-  txDivider: { borderBottomWidth: 1, borderBottomColor: colors.divider },
+  txRow:      { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 13 },
+  txDivider:  { borderBottomWidth: 1, borderBottomColor: colors.divider },
   txMerchant: { fontSize: typography.subhead, color: colors.textPrimary },
-  txAmount: { fontSize: typography.subhead, color: colors.textSecondary },
+  txAmount:   { fontSize: typography.subhead, color: colors.textSecondary },
 });
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function AnalysisScreen() {
-  const [habits, setHabits] = useState<DetectedHabit[]>([]);
-  const [aiInsights, setAiInsights] = useState<AIHabitInsight[]>([]);
-  const [coachingMessage, setCoachingMessage] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  const route = useRoute<RouteProp<TabParamList, 'Analysis'>>();
 
-  const [selectedHabit, setSelectedHabit] = useState<DetectedHabit | null>(null);
-  const [detailInsight, setDetailInsight] = useState<AIHabitInsight | null>(null);
-  const [detailLoading, setDetailLoading] = useState(false);
+  const [habits, setHabits]               = useState<DetectedHabit[]>([]);
+  const [aiInsights, setAiInsights]       = useState<AIHabitInsight[]>([]);
+  const [coachingMessage, setCoaching]    = useState<string | null>(null);
+  const [analysisHeadline, setHeadline]   = useState<string | null>(null);
+  const [loading, setLoading]             = useState(true);
+  const [refreshing, setRefreshing]       = useState(false);
 
-  const load = async () => {
-    const res = await api.getHabits(false).catch(() => null);
-    if (res) {
-      setHabits(res.habits ?? []);
-      setAiInsights(res.ai_insights ?? []);
-      setCoachingMessage((res as any).coaching_message ?? null);
-    }
-  };
+  const [selectedHabit, setSelectedHabit]   = useState<DetectedHabit | null>(null);
+  const [detailInsight, setDetailInsight]   = useState<AIHabitInsight | null>(null);
+  const [detailLoading, setDetailLoading]   = useState(false);
 
-  useEffect(() => { load().finally(() => setLoading(false)); }, []);
+  // Track a pending deep-link habit ID (set before habits have loaded)
+  const pendingHabitId = useRef<string | null>(null);
 
-  const onRefresh = useCallback(async () => {
-    setRefreshing(true);
-    await load();
-    setRefreshing(false);
-  }, []);
+  // Capture the habitId param whenever navigation delivers it
+  useEffect(() => {
+    const id = route.params?.habitId;
+    if (id) pendingHabitId.current = id;
+  }, [route.params?.habitId]);
 
   const openHabit = async (habit: DetectedHabit) => {
     setSelectedHabit(habit);
@@ -273,6 +541,54 @@ export default function AnalysisScreen() {
     }
   };
 
+  // When screen focuses and habits are already loaded, open any pending deep-link habit
+  useFocusEffect(useCallback(() => {
+    if (!pendingHabitId.current || habits.length === 0) return;
+    const target = habits.find((h) => h.id === pendingHabitId.current);
+    if (target) {
+      pendingHabitId.current = null;
+      openHabit(target);
+    }
+  }, [habits]));
+
+  const load = async () => {
+    const [habitsRes, analysisRes] = await Promise.allSettled([
+      api.getHabits(false),
+      api.getAnalysis(),
+    ]);
+
+    if (habitsRes.status === 'fulfilled' && habitsRes.value) {
+      const loadedHabits = habitsRes.value.habits ?? [];
+      setHabits(loadedHabits);
+      setAiInsights(habitsRes.value.ai_insights ?? []);
+      setCoaching((habitsRes.value as any).coaching_message ?? null);
+
+      // Open detail for any pending deep-link from Home screen
+      if (pendingHabitId.current) {
+        const target = loadedHabits.find((h) => h.id === pendingHabitId.current);
+        if (target) {
+          pendingHabitId.current = null;
+          openHabit(target);
+        }
+      }
+    }
+
+    if (analysisRes.status === 'fulfilled' && analysisRes.value?.analysis) {
+      const a = analysisRes.value.analysis;
+      // Use the spending summary insight as the headline anchor
+      const raw = a.spending_summary?.insight ?? a.greeting ?? null;
+      setHeadline(raw);
+    }
+  };
+
+  useEffect(() => { load().finally(() => setLoading(false)); }, []);
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await load();
+    setRefreshing(false);
+  }, []);
+
   const acknowledge = async () => {
     if (!selectedHabit) return;
     try {
@@ -284,8 +600,8 @@ export default function AnalysisScreen() {
     setSelectedHabit(null);
   };
 
-  const maxImpact = habits.reduce((m, h) => Math.max(m, h.monthly_impact), 1);
-  const totalImpact = habits.reduce((s, h) => s + h.monthly_impact, 0);
+  const spendingStyle = deriveStyle(habits);
+  const categories    = deriveCategories(habits);
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -297,76 +613,48 @@ export default function AnalysisScreen() {
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.textTertiary} />
         }
       >
-        {/* Header */}
-        <FadeInView index={0}>
-          <View style={styles.pageHeader}>
-            <Text style={styles.pageTitle}>Analysis</Text>
-            {coachingMessage ? (
-              <Text style={styles.subtitle}>{coachingMessage}</Text>
-            ) : null}
-          </View>
-        </FadeInView>
-
         {loading ? (
           <View style={styles.loadingBlock}>
             <ActivityIndicator color={colors.textTertiary} />
           </View>
         ) : (
           <>
-            {/* ── Patterns ── */}
-            <FadeInView index={1}>
-              <View style={styles.section}>
-                <Text style={styles.sectionLabel}>Spending Patterns</Text>
-
-                {habits.length === 0 ? (
-                  <Text style={styles.emptyText}>
-                    No patterns detected yet. Sync more transactions to get started.
-                  </Text>
-                ) : (
-                  <View style={styles.list}>
-                    {habits.map((h, i) => (
-                      <View key={h.id}>
-                        {i > 0 && <View style={styles.divider} />}
-                        <PatternRow
-                          name={h.title}
-                          description={h.description}
-                          monthlyImpact={h.monthly_impact}
-                          trend={toTrend(h.trend)}
-                          isNew={!h.is_acknowledged}
-                          onPress={() => openHabit(h)}
-                        />
-                      </View>
-                    ))}
-                  </View>
-                )}
-              </View>
+            {/* 1 — Insight hero */}
+            <FadeInView index={0}>
+              <InsightHero
+                coachingMessage={coachingMessage}
+                analysisHeadline={analysisHeadline}
+              />
             </FadeInView>
 
-            {/* ── Monthly impact ── */}
-            {habits.length > 0 && (
-              <FadeInView index={2}>
-                <View style={styles.section}>
-                  <Text style={styles.sectionLabel}>Monthly Impact</Text>
-                  <View style={styles.bars}>
-                    {habits
-                      .slice()
-                      .sort((a, b) => b.monthly_impact - a.monthly_impact)
-                      .map((h) => (
-                        <ScoreBar
-                          key={h.id}
-                          label={h.title}
-                          value={h.monthly_impact / maxImpact}
-                          amount={`${fmt(h.monthly_impact)}/mo`}
-                        />
-                      ))}
-                  </View>
-                  <View style={styles.totalRow}>
-                    <Text style={styles.totalLabel}>Total</Text>
-                    <Text style={styles.totalValue}>{fmt(totalImpact)}/mo</Text>
-                  </View>
-                </View>
-              </FadeInView>
+            <Divider />
+
+            {/* 2 — Spending style */}
+            <FadeInView index={1}>
+              <SpendingStyle label={spendingStyle.label} description={spendingStyle.description} />
+            </FadeInView>
+
+            <Divider />
+
+            {/* 3 — Recurring behavior */}
+            <FadeInView index={2}>
+              <RecurringBehavior
+                habits={habits}
+                onPress={openHabit}
+              />
+            </FadeInView>
+
+            {categories.length > 0 && (
+              <>
+                <Divider />
+                {/* 4 — Category breakdown */}
+                <FadeInView index={3}>
+                  <CategoryBreakdown categories={categories} />
+                </FadeInView>
+              </>
             )}
+
+            <View style={styles.footer} />
           </>
         )}
       </ScrollView>
@@ -383,83 +671,9 @@ export default function AnalysisScreen() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.background },
-  scroll: { flex: 1 },
-  content: { paddingBottom: 80 },
-
-  pageHeader: {
-    paddingHorizontal: 24,
-    paddingTop: 20,
-    paddingBottom: 28,
-  },
-  pageTitle: {
-    fontSize: typography.largeTitle,
-    fontWeight: typography.weights.semibold,
-    color: colors.textPrimary,
-    letterSpacing: -0.5,
-    marginBottom: 10,
-  },
-  subtitle: {
-    fontSize: typography.subhead,
-    color: colors.textSecondary,
-    lineHeight: typography.subhead * 1.6,
-    fontWeight: typography.weights.light,
-  },
-
-  loadingBlock: {
-    height: 200,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-
-  section: {
-    paddingHorizontal: 24,
-    paddingBottom: 40,
-  },
-  sectionLabel: {
-    fontSize: typography.caption,
-    fontWeight: typography.weights.medium,
-    color: colors.textTertiary,
-    letterSpacing: 1.0,
-    textTransform: 'uppercase',
-    marginBottom: 16,
-  },
-  list: {
-    borderTopWidth: 1,
-    borderTopColor: colors.divider,
-  },
-  divider: {
-    height: 1,
-    backgroundColor: colors.divider,
-  },
-  emptyText: {
-    fontSize: typography.subhead,
-    color: colors.textTertiary,
-    lineHeight: typography.subhead * 1.6,
-    fontWeight: typography.weights.light,
-  },
-
-  bars: {
-    borderTopWidth: 1,
-    borderTopColor: colors.divider,
-  },
-  totalRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingTop: 16,
-    marginTop: 4,
-    borderTopWidth: 1,
-    borderTopColor: colors.divider,
-  },
-  totalLabel: {
-    fontSize: typography.subhead,
-    color: colors.textTertiary,
-    fontWeight: typography.weights.regular,
-  },
-  totalValue: {
-    fontSize: typography.headline,
-    fontWeight: typography.weights.semibold,
-    color: colors.textPrimary,
-  },
+  safe:         { flex: 1, backgroundColor: colors.background },
+  scroll:       { flex: 1 },
+  content:      { paddingBottom: 40 },
+  loadingBlock: { height: 300, alignItems: 'center', justifyContent: 'center' },
+  footer:       { height: 40 },
 });

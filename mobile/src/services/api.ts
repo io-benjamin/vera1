@@ -624,14 +624,17 @@ export const submitInsightFeedback = async (
 /**
  * Get weekly AI-generated insight
  */
-export const getWeeklyInsight = async (): Promise<{
+export const getWeeklyInsight = async (force = false): Promise<{
   insight: {
     title: string;
     content: string;
     action: string;
   };
 }> => {
-  const response = await fetch(`${API_BASE_URL}/habits/insights/weekly`, {
+  const url = force
+    ? `${API_BASE_URL}/habits/insights/weekly?force=true`
+    : `${API_BASE_URL}/habits/insights/weekly`;
+  const response = await fetch(url, {
     method: 'GET',
     headers: await getAuthHeaders(),
   });
@@ -880,6 +883,7 @@ export interface NarrativeUnit {
     id: string;
     merchant: string;
     amount: number;
+    isCredit: boolean;
     category: string;
   };
   pattern?: {

@@ -1,6 +1,13 @@
 import { Router, Request, Response } from 'express';
 import { Pool } from 'pg';
 import { authMiddleware } from '../middleware/auth';
+import { validateBody, validateQuery } from '../middleware/validate';
+import {
+  createAccountSchema,
+  updateAccountSchema,
+  transactionTimeSchema,
+  transactionQuerySchema,
+} from '../validators/accounts.validators';
 
 const router = Router();
 const pool = new Pool({
@@ -130,24 +137,18 @@ router.get('/', authMiddleware(pool), async (req: Request, res: Response) => {
  * POST /api/accounts
  * Create a new account manually
  */
-router.post('/', authMiddleware(pool), async (req: Request, res: Response) => {
+router.post('/', authMiddleware(pool), validateBody(createAccountSchema), async (req: Request, res: Response) => {
   try {
     const userId = req.userId!;
+
     const { name, type, institution_name, balance } = req.body;
-
-    if (!name || !type || !institution_name) {
-      return res.status(400).json({
-        message: 'name, type, and institution_name are required',
-      });
-    }
-
     const result = await pool.query(
       `INSERT INTO accounts (user_id, name, type, institution_name, balance)
        VALUES ($1, $2, $3::account_type, $4, $5)
        ON CONFLICT (user_id, name, institution_name)
        DO UPDATE SET balance = $5, updated_at = CURRENT_TIMESTAMP
        RETURNING *`,
-      [userId, name, type, institution_name, balance || 0]
+      [userId, name, type, institution_name, balance ?? 0]
     );
 
     res.json({
@@ -167,7 +168,7 @@ router.post('/', authMiddleware(pool), async (req: Request, res: Response) => {
  * PUT /api/accounts/:accountId
  * Update an account
  */
-router.put('/:accountId', authMiddleware(pool), async (req: Request, res: Response) => {
+router.put('/:accountId', authMiddleware(pool), validateBody(updateAccountSchema), async (req: Request, res: Response) => {
   try {
     const userId = req.userId!;
     const { accountId } = req.params;
@@ -255,12 +256,11 @@ router.delete('/:accountId', authMiddleware(pool), async (req: Request, res: Res
  * GET /api/accounts/:accountId/transactions
  * Get transactions for a specific account
  */
-router.get('/:accountId/transactions', authMiddleware(pool), async (req: Request, res: Response) => {
+router.get('/:accountId/transactions', authMiddleware(pool), validateQuery(transactionQuerySchema), async (req: Request, res: Response) => {
   try {
     const userId = req.userId!;
     const { accountId } = req.params;
-    const page = parseInt(req.query.page as string) || 1;
-    const limit = Math.min(parseInt(req.query.limit as string) || 100, 500);
+    const { page, limit } = req.query as any;
     const offset = (page - 1) * limit;
 
     // Verify ownership
@@ -331,15 +331,10 @@ router.get('/:accountId/transactions', authMiddleware(pool), async (req: Request
 });
 
 // PATCH /transactions/:transactionId/time — user labels a transaction's time-of-day
-router.patch('/transactions/:transactionId/time', authMiddleware(pool), async (req: Request, res: Response) => {
+router.patch('/transactions/:transactionId/time', authMiddleware(pool), validateBody(transactionTimeSchema), async (req: Request, res: Response) => {
   const { transactionId } = req.params;
   const userId = req.userId!;
   const { time_of_day } = req.body;
-
-  const VALID = ['morning', 'midday', 'evening', 'night'];
-  if (!time_of_day || !VALID.includes(time_of_day)) {
-    return res.status(400).json({ message: 'time_of_day must be morning, midday, evening, or night' });
-  }
 
   try {
     // Make sure transaction belongs to this user via account owner check.

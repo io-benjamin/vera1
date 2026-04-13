@@ -14,6 +14,7 @@ import PersonalityScreen from '../screens/PersonalityScreen';
 import AnalysisScreen from '../screens/AnalysisScreen';
 import AccountTransactionsScreen from '../screens/AccountTransactionsScreen';
 import ProfileScreen from '../screens/ProfileScreen';
+import PatternDetailScreen from '../screens/PatternDetailScreen';
 import { colors, typography, spacing } from '../theme';
 
 export type RootStackParamList = {
@@ -23,11 +24,12 @@ export type RootStackParamList = {
   AccountTransactions: { accountId: string; accountName: string };
   Profile: undefined;
   Personality: undefined;
+  PatternDetail: { habitId: string };
 };
 
 export type TabParamList = {
   Home: undefined;
-  Analysis: undefined;
+  Analysis: { habitId?: string } | undefined;
   Timeline: undefined;
   Reflection: undefined;
 };
@@ -247,6 +249,11 @@ const AppNavigator = () => {
               name="Personality"
               component={PersonalityScreen}
               options={{ title: 'Spending Personality' }}
+            />
+            <Stack.Screen
+              name="PatternDetail"
+              component={PatternDetailScreen}
+              options={{ headerShown: false }}
             />
           </>
         )}

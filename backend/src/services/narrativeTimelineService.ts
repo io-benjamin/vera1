@@ -134,7 +134,9 @@ export class NarrativeTimelineService {
       const habit = txToHabit.get(tx.id);
       const merchantKey = this.normalizeMerchant(tx.merchant_name || tx.name);
       const displayName = tx.merchant_name || tx.name;
-      const amount = Math.abs(parseFloat(tx.amount));
+      const rawAmount = parseFloat(tx.amount);
+      const amount = Math.abs(rawAmount);
+      const isCredit = rawAmount < 0;
 
       // ── Pattern ──────────────────────────────────────────────────────────────
       let pattern: NarrativeUnit['pattern'] | undefined;
@@ -144,12 +146,12 @@ export class NarrativeTimelineService {
           score >= 0.7 ? 'high' : score >= 0.4 ? 'medium' : 'low';
         const firstDetected = new Date(habit.first_detected);
         const isNew = (now.getTime() - firstDetected.getTime()) < 7 * 24 * 60 * 60 * 1000;
-        const state: NarrativeUnit['pattern']['state'] =
+        const state: NonNullable<NarrativeUnit['pattern']>['state'] =
           isNew ? 'New'
           : habit.trend === 'increasing' ? 'Increasing'
           : habit.trend === 'stable' ? 'Stable'
           : 'Active';
-        const trend = (habit.trend as NarrativeUnit['pattern']['trend']) || 'stable';
+        const trend = (habit.trend as NonNullable<NarrativeUnit['pattern']>['trend']) || 'stable';
 
         pattern = { id: habit.id, title: habit.title, trend, state, confidence };
       }
@@ -208,7 +210,7 @@ export class NarrativeTimelineService {
 
       if (timeLabel && ['morning', 'midday', 'evening', 'night'].includes(timeLabel)) {
         time_context = {
-          label: timeLabel as NarrativeUnit['time_context']['label'],
+          label: timeLabel as NonNullable<NarrativeUnit['time_context']>['label'],
           source: timeSource,
         };
       }
@@ -262,6 +264,7 @@ export class NarrativeTimelineService {
           id: tx.id,
           merchant: displayName,
           amount,
+          isCredit,
           category: tx.category || '',
         },
         pattern,

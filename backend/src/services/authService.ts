@@ -38,6 +38,28 @@ export class AuthService {
       clientId: process.env.WORKOS_CLIENT_ID!,
     });
 
+    // If an email/password account already exists for this email, link the
+    // WorkOS identity to it so the user keeps their connected bank accounts.
+    const existing = await this.pool.query(
+      `SELECT id FROM users WHERE email = $1 AND workos_user_id IS NULL`,
+      [wu.email.toLowerCase()]
+    );
+
+    if (existing.rows.length > 0) {
+      const result = await this.pool.query(
+        `UPDATE users
+         SET workos_user_id = $1,
+             first_name     = COALESCE(first_name, $2),
+             last_name      = COALESCE(last_name,  $3),
+             updated_at     = CURRENT_TIMESTAMP
+         WHERE id = $4
+         RETURNING id, email, first_name, last_name, phone, preferred_language, created_at, updated_at`,
+        [wu.id, wu.firstName ?? null, wu.lastName ?? null, existing.rows[0].id]
+      );
+      const user: User = result.rows[0];
+      return { token: this.generateToken(user.id), user };
+    }
+
     const result = await this.pool.query(
       `INSERT INTO users (email, first_name, last_name, workos_user_id, preferred_language)
        VALUES ($1, $2, $3, $4, 'en')
@@ -47,7 +69,7 @@ export class AuthService {
              last_name  = COALESCE(EXCLUDED.last_name,  users.last_name),
              updated_at = CURRENT_TIMESTAMP
        RETURNING id, email, first_name, last_name, phone, preferred_language, created_at, updated_at`,
-      [wu.email, wu.firstName ?? null, wu.lastName ?? null, wu.id]
+      [wu.email.toLowerCase(), wu.firstName ?? null, wu.lastName ?? null, wu.id]
     );
 
     const user: User = result.rows[0];

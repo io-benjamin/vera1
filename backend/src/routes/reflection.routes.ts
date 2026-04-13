@@ -2,6 +2,8 @@ import { Router, Request, Response } from 'express';
 import { Pool } from 'pg';
 import { authMiddleware } from '../middleware/auth';
 import { ReflectionService } from '../services/reflectionService';
+import { validateBody, validateQuery } from '../middleware/validate';
+import { answerSchema, historyQuerySchema } from '../validators/reflection.validators';
 
 const router = Router();
 
@@ -32,20 +34,11 @@ export function createReflectionRoutes(pool: Pool): Router {
    * When time_of_day is provided and the question is linked to a transaction,
    * that transaction's user_time_of_day is updated (source=user, confidence=high).
    */
-  router.post('/:id/answer', authMiddleware(pool), async (req: Request, res: Response) => {
+  router.post('/:id/answer', authMiddleware(pool), validateBody(answerSchema), async (req: Request, res: Response) => {
     try {
       const userId = req.userId!;
       const { id } = req.params;
       const { answer, time_of_day } = req.body;
-
-      if (!answer || typeof answer !== 'string' || answer.trim().length === 0) {
-        return res.status(400).json({ message: 'answer is required' });
-      }
-
-      const VALID_TIMES = ['morning', 'midday', 'evening', 'night'] as const;
-      if (time_of_day !== undefined && !VALID_TIMES.includes(time_of_day)) {
-        return res.status(400).json({ message: 'time_of_day must be morning, midday, evening, or night' });
-      }
 
       const { response, followUp, signatureMoment } = await reflectionService.submitAnswer(userId, id, answer);
 
@@ -78,10 +71,10 @@ export function createReflectionRoutes(pool: Pool): Router {
    * GET /api/reflections/history
    * Get all answered responses for the user (most recent first)
    */
-  router.get('/history', authMiddleware(pool), async (req: Request, res: Response) => {
+  router.get('/history', authMiddleware(pool), validateQuery(historyQuerySchema), async (req: Request, res: Response) => {
     try {
       const userId = req.userId!;
-      const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
+      const limit = (req.query as any).limit as number;
       const responses = await reflectionService.getAnsweredResponses(userId, limit);
       res.json({ responses, count: responses.length });
     } catch (error) {

@@ -183,7 +183,15 @@ export default function ProfileScreen() {
 
         {/* Connected accounts */}
         <View style={styles.section}>
-          <Text style={styles.sectionLabel}>Connected Accounts</Text>
+          <View style={styles.sectionRow}>
+            <Text style={styles.sectionLabel}>Connected Accounts</Text>
+            <Pressable
+              onPress={() => (navigation as any).navigate('ConnectAccounts')}
+              style={({ pressed }) => pressed && { opacity: 0.6 }}
+            >
+              <Text style={styles.actionLink}>+ Add Account</Text>
+            </Pressable>
+          </View>
           {accounts.length === 0 ? (
             <View style={styles.card}>
               <Text style={styles.emptyText}>No accounts connected.</Text>

@@ -1,7 +1,7 @@
 import React, { useRef } from 'react';
 import { Animated, Pressable, StyleSheet, Text, View } from 'react-native';
 import { colors } from '../theme/colors';
-import { typography } from '../theme/typography';
+import { fonts, typography } from '../theme/typography';
 import { TrendDirection } from '../types/behavior';
 
 interface Props {
@@ -13,11 +13,11 @@ interface Props {
   onPress?: () => void;
 }
 
-const TREND_META: Record<TrendDirection, { label: string; color: string }> = {
-  increasing:  { label: 'Increasing',  color: colors.trendUp      },
-  decreasing:  { label: 'Decreasing',  color: colors.trendDown    },
-  recovering:  { label: 'Recovering',  color: colors.scoreMid     },
-  stable:      { label: 'Stable',      color: colors.textTertiary },
+const TREND_META: Record<TrendDirection, { label: string }> = {
+  increasing: { label: 'More frequent lately' },
+  decreasing: { label: 'Less frequent lately' },
+  recovering: { label: 'Settling down'        },
+  stable:     { label: 'Consistent'           },
 };
 
 export default function PatternRow({ name, description, monthlyImpact, trend, isNew, onPress }: Props) {
@@ -50,7 +50,7 @@ export default function PatternRow({ name, description, monthlyImpact, trend, is
 
         {/* Right */}
         <View style={styles.right}>
-          <Text style={[styles.trend, { color: meta.color }]}>{meta.label}</Text>
+          <Text style={styles.trend}>{meta.label}</Text>
           <Text style={styles.impact}>${monthlyImpact.toFixed(0)}/mo</Text>
         </View>
       </Pressable>
@@ -81,10 +81,10 @@ const styles = StyleSheet.create({
     backgroundColor: colors.accent,
   },
   name: {
+    fontFamily: fonts.serif,
     fontSize: typography.subhead,
-    fontWeight: typography.weights.medium,
+    fontWeight: typography.weights.regular,
     color: colors.textPrimary,
-    letterSpacing: -0.1,
   },
   description: {
     fontSize: typography.caption,
@@ -96,8 +96,10 @@ const styles = StyleSheet.create({
     gap: 3,
   },
   trend: {
+    fontFamily: fonts.sans,
     fontSize: typography.footnote,
-    fontWeight: typography.weights.medium,
+    fontWeight: typography.weights.regular,
+    color: colors.textTertiary,
   },
   impact: {
     fontSize: typography.caption,

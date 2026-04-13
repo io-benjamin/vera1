@@ -14,8 +14,9 @@ import {
   Platform,
 } from 'react-native';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
+import { StackNavigationProp } from '@react-navigation/stack';
 import { colors } from '../theme/colors';
-import { typography } from '../theme/typography';
+import { fonts, typography } from '../theme/typography';
 import {
   getPendingReflections,
   getReflectionHistory,
@@ -25,9 +26,9 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { FadeInView } from '../components/FadeInView';
 
-// ─── Animated pill ────────────────────────────────────────────────────────────
+// ─── Chip ─────────────────────────────────────────────────────────────────────
 
-function Pill({
+function Chip({
   label,
   selected,
   onPress,
@@ -39,90 +40,143 @@ function Pill({
   disabled?: boolean;
 }) {
   const scale = useRef(new Animated.Value(1)).current;
-  const bgOpacity = useRef(new Animated.Value(selected ? 1 : 0)).current;
+  const fill  = useRef(new Animated.Value(selected ? 1 : 0)).current;
 
   useEffect(() => {
-    Animated.timing(bgOpacity, {
+    Animated.timing(fill, {
       toValue: selected ? 1 : 0,
-      duration: 180,
-      useNativeDriver: true,
+      duration: 160,
+      useNativeDriver: false,
     }).start();
   }, [selected]);
 
-  const onPressIn = () =>
-    Animated.spring(scale, { toValue: 0.95, useNativeDriver: true, speed: 40, bounciness: 0 }).start();
-
-  const onPressOut = () =>
-    Animated.spring(scale, { toValue: 1, useNativeDriver: true, speed: 20, bounciness: 5 }).start();
-
-  const backgroundColor = bgOpacity.interpolate({
-    inputRange: [0, 1],
-    outputRange: ['rgba(0,0,0,0)', colors.accent],
-  });
-  const textColor = bgOpacity.interpolate({
-    inputRange: [0, 1],
-    outputRange: [colors.textSecondary, '#FFFFFF'],
-  });
+  // Unselected: accentLight tint with accent border — warm, not clinical white
+  const bg  = fill.interpolate({ inputRange: [0, 1], outputRange: [colors.accentLight, colors.accent] });
+  const fg  = fill.interpolate({ inputRange: [0, 1], outputRange: [colors.textSecondary, '#FFFFFF'] });
+  const bdr = fill.interpolate({ inputRange: [0, 1], outputRange: ['#C8D9CA', colors.accent] });
 
   return (
-    <Animated.View style={[pillStyles.pill, { backgroundColor, transform: [{ scale }] }]}>
-      <Pressable
-        onPress={onPress}
-        onPressIn={onPressIn}
-        onPressOut={onPressOut}
-        disabled={disabled}
-        style={pillStyles.pillInner}
-      >
-        <Animated.Text style={[pillStyles.label, { color: textColor }]}>
-          {label}
-        </Animated.Text>
-      </Pressable>
+    <Animated.View style={{ transform: [{ scale }] }}>
+      <Animated.View style={[chipStyles.chip, { backgroundColor: bg, borderColor: bdr }]}>
+        <Pressable
+          onPress={onPress}
+          onPressIn={() =>
+            Animated.spring(scale, { toValue: 0.95, useNativeDriver: true, speed: 40, bounciness: 0 }).start()
+          }
+          onPressOut={() =>
+            Animated.spring(scale, { toValue: 1, useNativeDriver: true, speed: 20, bounciness: 4 }).start()
+          }
+          disabled={disabled}
+          style={chipStyles.inner}
+        >
+          <Animated.Text style={[chipStyles.label, { color: fg }]}>{label}</Animated.Text>
+        </Pressable>
+      </Animated.View>
     </Animated.View>
   );
 }
 
-const pillStyles = StyleSheet.create({
-  pill: {
-    borderRadius: 24,
+const chipStyles = StyleSheet.create({
+  chip: {
+    borderRadius: 20,
+    borderWidth: 1,
     overflow: 'hidden',
   },
-  pillInner: {
-    paddingHorizontal: 16,
-    paddingVertical: 9,
+  inner: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
   },
   label: {
-    fontSize: typography.subhead,
+    fontFamily: fonts.sans,
+    fontSize: typography.footnote,
     fontWeight: typography.weights.medium,
   },
 });
 
-const TIME_OPTIONS = ['Morning', 'Midday', 'Evening', 'Night'] as const;
+// ─── Moment card ──────────────────────────────────────────────────────────────
 
-// ─── Single question card ─────────────────────────────────────────────────────
-
-interface QuestionCardProps {
+interface CardProps {
   item: UserResponse;
   onAnswered: (id: string, followUp: UserResponse | null) => void;
+  onSkip: (id: string) => void;
 }
 
-function QuestionCard({ item, onAnswered }: QuestionCardProps) {
-  const options = item.options ?? [];
-  const [selected, setSelected] = useState<string | null>(null);
-  const [timeSelected, setTimeSelected] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-  const [txExpanded, setTxExpanded] = useState(false);
-  const [signatureMoment, setSignatureMoment] = useState<{ callback: string; emoji: string } | null>(null);
-  const txList = item.sample_transactions ?? [];
+// Derive chips from the actual merchant name and category — not the question text.
+function getTransactionOptions(merchantName: string | null, category: string | null): string[] {
+  const m = (merchantName ?? '').toLowerCase();
+  const c = (category ?? '').toLowerCase();
 
-  // Auto-submit as soon as an option is tapped
+  // ── Subscriptions / creative tools ───────────────────────────────────────
+  if (/capcut|adobe|figma|canva|notion|spotify|netflix|hulu|disney|apple|youtube|dropbox|slack/.test(m))
+    return ['Still using it', 'Forgot to cancel', 'Use it regularly', 'Could switch to free', 'Not sure'];
+
+  // ── Food delivery ─────────────────────────────────────────────────────────
+  if (/uber eats|doordash|grubhub|instacart|postmates|seamless|caviar/.test(m) || c.includes('food_delivery'))
+    return ['Too tired to cook', 'Craving it', 'No groceries', 'With others', 'Just convenient'];
+
+  // ── Coffee / café ─────────────────────────────────────────────────────────
+  if (/starbucks|dunkin|coffee|cafe|espresso|blue bottle|peet/.test(m))
+    return ['Morning routine', 'Needed the boost', 'Was already out', 'Social', 'Just habit'];
+
+  // ── Rideshare / transport ─────────────────────────────────────────────────
+  if (/uber|lyft|taxi|waymo/.test(m) || c.includes('transport'))
+    return ['No other option', 'Convenience', 'Was running late', 'With others', 'Treating myself'];
+
+  // ── Amazon / general shopping ─────────────────────────────────────────────
+  if (/amazon/.test(m))
+    return ['Planned it', 'Saw it and acted', 'Prime impulse', 'Needed it', 'Not sure'];
+
+  // ── Retail / clothing ─────────────────────────────────────────────────────
+  if (/target|walmart|costco|zara|h&m|gap|uniqlo|lululemon|nike|adidas/.test(m) || c.includes('shopping'))
+    return ['Planned it', 'Spontaneous', 'Sale or deal', 'Treating myself', 'Not sure'];
+
+  // ── Restaurants / dining ─────────────────────────────────────────────────
+  if (c.includes('dining') || c.includes('restaurant') || c.includes('food'))
+    return ['Planned outing', 'Spontaneous', 'With friends', 'Treating myself', 'Convenient'];
+
+  // ── Gaming / entertainment ────────────────────────────────────────────────
+  if (/steam|playstation|xbox|nintendo|twitch|roblox/.test(m) || c.includes('entertainment'))
+    return ['Planned it', 'Impulse', 'On sale', 'Treat after a long day', 'Just happened'];
+
+  // ── Health / fitness ──────────────────────────────────────────────────────
+  if (/gym|fitness|peloton|yoga|equinox/.test(m) || c.includes('health'))
+    return ['Staying on track', 'Impulse sign-up', 'Feeling motivated', 'Social pressure', 'Routine'];
+
+  // ── Late night (by time context, no merchant match) ───────────────────────
+  if (c.includes('late') || c.includes('night'))
+    return ['Tired', 'Bored', 'Craving something', 'Treating myself', 'Not sure'];
+
+  // ── Default ───────────────────────────────────────────────────────────────
+  return ['Planned it', 'Spontaneous', 'Just habit', 'Treating myself', 'Not sure'];
+}
+
+// Strip the data preamble Claude sometimes adds ("This pattern appeared N times…")
+// and keep just the human question at the end.
+function humanizeQuestion(q: string): string {
+  const sentenceMatch = q.match(/([^.?!]*\?)\s*$/);
+  if (sentenceMatch) return sentenceMatch[1].trim();
+  return q;
+}
+
+function MomentCard({ item, onAnswered, onSkip }: CardProps) {
+  const anchor = (item.sample_transactions ?? [])[0] ?? null;
+  const options = (item.options && item.options.length > 0)
+    ? item.options
+    : getTransactionOptions(anchor?.merchant_name ?? null, anchor?.category ?? null);
+  const [selected, setSelected]   = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [confirmed, setConfirmed]  = useState(false);
+
+  const question = humanizeQuestion(item.question);
+
   const handleSelect = async (opt: string) => {
     if (submitting || selected) return;
     setSelected(opt);
     setSubmitting(true);
     try {
       const result = await submitReflectionAnswer(item.id, opt);
-      setSignatureMoment(result.signatureMoment);
-      onAnswered(item.id, result.followUp);
+      setConfirmed(true);
+      setTimeout(() => onAnswered(item.id, result.followUp ?? null), 800);
     } catch (e: any) {
       Alert.alert('Error', e.message ?? 'Could not save your answer. Try again.');
       setSelected(null);
@@ -131,203 +185,164 @@ function QuestionCard({ item, onAnswered }: QuestionCardProps) {
     }
   };
 
-  const toggleTransactions = () => setTxExpanded((v) => !v);
-
   return (
-    <View style={cardStyles.container}>
-      {/* Question */}
-      <Text style={cardStyles.question}>{item.question}</Text>
-
-      {/* Influence pills */}
-      {options.length > 0 && (
-        <View style={cardStyles.group}>
-          <Text style={cardStyles.groupLabel}>What influenced this?</Text>
-          <View style={cardStyles.pillsWrap}>
-            {options.map((opt) => (
-              <Pill
-                key={opt}
-                label={opt}
-                selected={selected === opt}
-                onPress={() => handleSelect(opt)}
-                disabled={submitting || !!selected}
-              />
-            ))}
+    <View style={cardStyles.card}>
+      {/* Receipt stub — merchant + amount */}
+      {anchor ? (
+        <View style={cardStyles.receipt}>
+          <View style={cardStyles.receiptLeft}>
+            <Text style={cardStyles.receiptMerchant} numberOfLines={1}>
+              {anchor.merchant_name ?? 'Transaction'}
+            </Text>
+            <Text style={cardStyles.receiptDate}>
+              {new Date((anchor as any).date + 'T00:00:00').toLocaleDateString('en-US', {
+                month: 'short', day: 'numeric',
+              })}
+            </Text>
           </View>
+          <Text style={cardStyles.receiptAmount}>
+            ${Math.abs(anchor.amount).toFixed(2)}
+          </Text>
         </View>
-      )}
+      ) : null}
 
-      {/* Time of day pills — always shown */}
-      <View style={cardStyles.group}>
-        <Text style={cardStyles.groupLabel}>When did this occur?</Text>
-        <View style={cardStyles.pillsWrap}>
-          {TIME_OPTIONS.map((t) => (
-            <Pill
-              key={t}
-              label={t}
-              selected={timeSelected === t}
-              onPress={() => setTimeSelected((prev) => (prev === t ? null : t))}
-              disabled={submitting}
+      {/* Divider between receipt and question */}
+      <View style={cardStyles.receiptDivider} />
+
+      {/* Question */}
+      <Text style={cardStyles.question}>{question}</Text>
+
+      {/* Chips */}
+      {!confirmed ? (
+        <View style={cardStyles.chips}>
+          {options.map((opt: string) => (
+            <Chip
+              key={opt}
+              label={opt}
+              selected={selected === opt}
+              onPress={() => handleSelect(opt)}
+              disabled={submitting || !!selected}
             />
           ))}
         </View>
-      </View>
+      ) : null}
 
-      {/* Submitting indicator */}
-      {submitting && (
-        <ActivityIndicator
-          color={colors.textTertiary}
-          size="small"
-          style={{ alignSelf: 'flex-start', marginBottom: 16 }}
-        />
-      )}
+      {/* Loading */}
+      {submitting && !confirmed ? (
+        <ActivityIndicator color={colors.accent} size="small" style={cardStyles.spinner} />
+      ) : null}
 
-      {/* Signature Moment - Continuity Callback */}
-      {signatureMoment && (
-        <View style={cardStyles.signatureMoment}>
-          <Text style={cardStyles.signatureEmoji}>{signatureMoment.emoji}</Text>
-          <Text style={cardStyles.signatureText}>{signatureMoment.callback}</Text>
-        </View>
-      )}
+      {/* Got it */}
+      {confirmed ? (
+        <Text style={cardStyles.confirmed}>Noted — this helps surface clearer patterns.</Text>
+      ) : null}
 
-      {/* See transactions */}
-      {item.pattern_id && txList.length > 0 && (
-        <View style={cardStyles.txSection}>
-          <Pressable
-            onPress={toggleTransactions}
-            style={({ pressed }) => [cardStyles.txToggle, pressed && { opacity: 0.6 }]}
-          >
-            <Text style={cardStyles.txToggleLabel}>
-              {txExpanded ? 'Hide transactions' : 'See transactions'}
-            </Text>
-          </Pressable>
-          {txExpanded && (
-            <View style={cardStyles.txList}>
-              {txList.map((tx, i) => (
-                <View
-                  key={tx.transaction_id}
-                  style={[cardStyles.txRow, i < txList.length - 1 && cardStyles.txRowDivider]}
-                >
-                  <View style={cardStyles.txMeta}>
-                    <Text style={cardStyles.txMerchant}>{tx.merchant_name ?? 'Transaction'}</Text>
-                    <Text style={cardStyles.txDate}>
-                      {new Date(tx.date + 'T00:00:00').toLocaleDateString('en-US', {
-                        month: 'short', day: 'numeric',
-                      })}
-                    </Text>
-                  </View>
-                  <Text style={cardStyles.txAmount}>${Math.abs(tx.amount).toFixed(2)}</Text>
-                </View>
-              ))}
-            </View>
-          )}
-        </View>
-      )}
+      {/* Skip */}
+      {!selected ? (
+        <Pressable
+          onPress={() => onSkip(item.id)}
+          style={({ pressed }) => [cardStyles.skip, pressed && { opacity: 0.5 }]}
+          hitSlop={12}
+        >
+          <Text style={cardStyles.skipLabel}>Skip for now</Text>
+        </Pressable>
+      ) : null}
     </View>
   );
 }
 
 const cardStyles = StyleSheet.create({
-  container: {
-    paddingBottom: 40,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.divider,
-    marginBottom: 40,
+  card: {
+    backgroundColor: colors.surface,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 20,
+    marginBottom: 16,
+    shadowColor: colors.shadow,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 1,
+    shadowRadius: 8,
+    elevation: 2,
   },
+
+  // Receipt stub
+  receipt: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 16,
+  },
+  receiptLeft: {
+    gap: 3,
+    flex: 1,
+  },
+  receiptMerchant: {
+    fontFamily: fonts.sans,
+    fontSize: typography.subhead,
+    fontWeight: typography.weights.semibold,
+    color: colors.textPrimary,
+  },
+  receiptDate: {
+    fontFamily: fonts.sans,
+    fontSize: typography.caption,
+    color: colors.textTertiary,
+    fontWeight: typography.weights.regular,
+  },
+  receiptAmount: {
+    fontFamily: fonts.sans,
+    fontSize: typography.headline,
+    fontWeight: typography.weights.semibold,
+    color: colors.textPrimary,
+  },
+  receiptDivider: {
+    height: 1,
+    backgroundColor: colors.divider,
+    marginBottom: 18,
+  },
+
+  // Question
   question: {
+    fontFamily: fonts.serif,
     fontSize: typography.title3,
-    fontWeight: typography.weights.light,
+    fontWeight: typography.weights.regular,
     color: colors.textPrimary,
     lineHeight: typography.title3 * 1.45,
-    marginBottom: 28,
+    marginBottom: 20,
   },
-  group: {
-    marginBottom: 24,
-  },
-  groupLabel: {
-    fontSize: typography.caption,
-    fontWeight: typography.weights.medium,
-    color: colors.textTertiary,
-    letterSpacing: 0.6,
-    textTransform: 'uppercase',
-    marginBottom: 12,
-  },
-  pillsWrap: {
+
+  // Tags
+  chips: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 8,
+    marginBottom: 20,
   },
-  txSection: {
-    marginTop: 4,
-    marginBottom: 8,
-  },
-  txToggle: {
-    alignSelf: 'flex-start',
-    paddingVertical: 4,
-    marginBottom: 12,
-  },
-  txToggleLabel: {
+
+  // Feedback
+  spinner: { marginBottom: 16, alignSelf: 'flex-start' },
+  confirmed: {
+    fontFamily: fonts.sans,
     fontSize: typography.footnote,
     color: colors.accent,
     fontWeight: typography.weights.medium,
+    marginBottom: 4,
   },
-  txList: {
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: colors.divider,
-    overflow: 'hidden',
+
+  // Skip
+  skip: {
+    alignSelf: 'flex-start',
+    marginTop: 2,
   },
-  txRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-  },
-  txRowDivider: {
-    borderBottomWidth: 1,
-    borderBottomColor: colors.divider,
-  },
-  txMeta: {
-    flex: 1,
-    gap: 2,
-  },
-  txMerchant: {
-    fontSize: typography.subhead,
-    color: colors.textPrimary,
-  },
-  txDate: {
+  skipLabel: {
+    fontFamily: fonts.sans,
     fontSize: typography.caption,
     color: colors.textTertiary,
-  },
-  txAmount: {
-    fontSize: typography.subhead,
-    color: colors.textSecondary,
-    fontWeight: typography.weights.medium,
-  },
-  signatureMoment: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.backgroundSecondary,
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    marginTop: 16,
-    marginBottom: 8,
-    gap: 12,
-  },
-  signatureEmoji: {
-    fontSize: 20,
-  },
-  signatureText: {
-    fontSize: typography.subhead,
-    color: colors.textSecondary,
-    fontWeight: typography.weights.medium,
-    lineHeight: typography.subhead * 1.4,
-    flex: 1,
+    fontWeight: typography.weights.regular,
   },
 });
 
-// ─── Answered item (read-only) ────────────────────────────────────────────────
+// ─── Answered row (read-only history) ─────────────────────────────────────────
 
 function AnsweredRow({ item }: { item: UserResponse }) {
   return (
@@ -336,10 +351,7 @@ function AnsweredRow({ item }: { item: UserResponse }) {
       <Text style={answeredStyles.answer}>"{item.answer}"</Text>
       {item.answered_at && (
         <Text style={answeredStyles.date}>
-          {new Date(item.answered_at).toLocaleDateString('en-US', {
-            month: 'short',
-            day: 'numeric',
-          })}
+          {new Date(item.answered_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
         </Text>
       )}
     </View>
@@ -354,18 +366,19 @@ const answeredStyles = StyleSheet.create({
     gap: 6,
   },
   question: {
+    fontFamily: fonts.sans,
     fontSize: typography.footnote,
     color: colors.textTertiary,
-    fontWeight: typography.weights.medium,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
+    fontWeight: typography.weights.regular,
   },
   answer: {
+    fontFamily: fonts.sans,
     fontSize: typography.subhead,
     color: colors.textPrimary,
     lineHeight: typography.subhead * 1.5,
   },
   date: {
+    fontFamily: fonts.sans,
     fontSize: typography.caption,
     color: colors.textTertiary,
   },
@@ -374,33 +387,30 @@ const answeredStyles = StyleSheet.create({
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function ReflectionScreen() {
-  const navigation = useNavigation();
+  const navigation = useNavigation<StackNavigationProp<any>>();
   const { user } = useAuth();
 
-  const [pending, setPending] = useState<UserResponse[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  const [pending, setPending]               = useState<UserResponse[]>([]);
+  const [loading, setLoading]               = useState(true);
+  const [refreshing, setRefreshing]         = useState(false);
   const [recentlyAnswered, setRecentlyAnswered] = useState<UserResponse[]>([]);
-  const [history, setHistory] = useState<UserResponse[]>([]);
+  const [history, setHistory]               = useState<UserResponse[]>([]);
 
   const load = async () => {
-    const questions = await getPendingReflections().catch(() => []);
-    const historyResponses = await getReflectionHistory(20).catch(() => []);
+    const [questions, historyResponses] = await Promise.all([
+      getPendingReflections().catch(() => []),
+      getReflectionHistory(20).catch(() => []),
+    ]);
     setPending(questions);
     setHistory(historyResponses);
   };
 
   useEffect(() => { load().finally(() => setLoading(false)); }, []);
 
-  useFocusEffect(
-    useCallback(() => {
-      setLoading(true);
-      load().finally(() => setLoading(false));
-      return () => {
-        // no cleanup needed
-      };
-    }, [])
-  );
+  useFocusEffect(useCallback(() => {
+    setLoading(true);
+    load().finally(() => setLoading(false));
+  }, []));
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -409,24 +419,18 @@ export default function ReflectionScreen() {
   }, []);
 
   const handleAnswered = (id: string, followUp: UserResponse | null) => {
-    // Remove answered question from pending
     const answered = pending.find((q) => q.id === id);
     setPending((prev) => prev.filter((q) => q.id !== id));
+    if (answered) setRecentlyAnswered((prev) => [{ ...answered }, ...prev]);
+    if (followUp)  setPending((prev) => [followUp, ...prev]);
+  };
 
-    // Move it to recently answered
-    if (answered) {
-      setRecentlyAnswered((prev) => [{ ...answered }, ...prev]);
-    }
-
-    // If there's a follow-up, prepend it to pending
-    if (followUp) {
-      setPending((prev) => [followUp, ...prev]);
-    }
+  const handleSkip = (id: string) => {
+    setPending((prev) => prev.filter((q) => q.id !== id));
   };
 
   const hasPending = pending.length > 0;
-  const hasAnswered = recentlyAnswered.length > 0;
-  const hasHistory = history.length > 0;
+  const hasHistory  = history.length > 0;
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -441,11 +445,7 @@ export default function ReflectionScreen() {
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
           refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={onRefresh}
-              tintColor={colors.textTertiary}
-            />
+            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.textTertiary} />
           }
         >
           {/* Header */}
@@ -469,25 +469,22 @@ export default function ReflectionScreen() {
           </FadeInView>
 
           {loading ? (
-            <FadeInView index={1}>
-              <View style={styles.loadingBlock}>
-                <ActivityIndicator color={colors.textTertiary} />
-              </View>
-            </FadeInView>
+            <View style={styles.loadingBlock}>
+              <ActivityIndicator color={colors.textTertiary} />
+            </View>
           ) : (
             <>
-              {/* Pending questions */}
               {hasPending ? (
                 <FadeInView index={1}>
                   <View style={styles.section}>
-                    <Text style={styles.sectionLabel}>
-                      {pending.length} question{pending.length !== 1 ? 's' : ''} waiting
-                    </Text>
+                    {/* No count — just a quiet label */}
+                    <Text style={styles.sectionLabel}>Recent moments</Text>
                     {pending.map((item) => (
-                      <QuestionCard
+                      <MomentCard
                         key={item.id}
                         item={item}
                         onAnswered={handleAnswered}
+                        onSkip={handleSkip}
                       />
                     ))}
                   </View>
@@ -506,17 +503,17 @@ export default function ReflectionScreen() {
                   <View style={styles.emptyBlock}>
                     <Text style={styles.emptyTitle}>All caught up</Text>
                     <Text style={styles.emptyBody}>
-                      New questions appear after spending patterns are detected. Check back after your next sync.
+                      New moments appear after spending patterns are detected.
                     </Text>
                   </View>
                 </FadeInView>
               )}
 
-              {/* Recently answered in this session */}
-              {hasAnswered && (
+              {/* Recently answered this session */}
+              {recentlyAnswered.length > 0 && (
                 <FadeInView index={2}>
                   <View style={styles.section}>
-                    <Text style={styles.sectionLabel}>Just answered</Text>
+                    <Text style={styles.sectionLabel}>Just noted</Text>
                     {recentlyAnswered.map((item) => (
                       <AnsweredRow key={item.id} item={item} />
                     ))}
@@ -532,15 +529,10 @@ export default function ReflectionScreen() {
 }
 
 const styles = StyleSheet.create({
-  safe: {
-    flex: 1,
-    backgroundColor: colors.background,
-  },
-  flex: { flex: 1 },
-  scroll: { flex: 1 },
-  content: {
-    paddingBottom: 80,
-  },
+  safe:    { flex: 1, backgroundColor: colors.background },
+  flex:    { flex: 1 },
+  scroll:  { flex: 1 },
+  content: { paddingBottom: 80 },
 
   header: {
     flexDirection: 'row',
@@ -550,17 +542,16 @@ const styles = StyleSheet.create({
     paddingTop: 20,
     paddingBottom: 32,
   },
-  headerLeft: {
-    flex: 1,
-  },
+  headerLeft: { flex: 1 },
   pageTitle: {
-    fontSize: typography.largeTitle,
-    fontWeight: typography.weights.semibold,
+    fontFamily: fonts.serif,
+    fontSize: typography.title1,
+    fontWeight: typography.weights.regular,
     color: colors.textPrimary,
-    letterSpacing: -0.5,
     marginBottom: 8,
   },
   pageSubtitle: {
+    fontFamily: fonts.sans,
     fontSize: typography.subhead,
     color: colors.textSecondary,
     fontWeight: typography.weights.light,
@@ -580,23 +571,18 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
   },
 
-  loadingBlock: {
-    height: 200,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
+  loadingBlock: { height: 200, alignItems: 'center', justifyContent: 'center' },
 
   section: {
     paddingHorizontal: 24,
     paddingBottom: 16,
   },
   sectionLabel: {
+    fontFamily: fonts.sans,
     fontSize: typography.caption,
-    fontWeight: typography.weights.medium,
+    fontWeight: typography.weights.regular,
     color: colors.textTertiary,
-    letterSpacing: 0.8,
-    textTransform: 'uppercase',
-    marginBottom: 24,
+    marginBottom: 28,
   },
 
   emptyBlock: {
@@ -605,12 +591,14 @@ const styles = StyleSheet.create({
     paddingBottom: 40,
   },
   emptyTitle: {
+    fontFamily: fonts.sans,
     fontSize: typography.headline,
     fontWeight: typography.weights.semibold,
     color: colors.textSecondary,
     marginBottom: 8,
   },
   emptyBody: {
+    fontFamily: fonts.sans,
     fontSize: typography.subhead,
     color: colors.textTertiary,
     lineHeight: typography.subhead * 1.6,

@@ -648,6 +648,7 @@ export enum HabitType {
   RECURRING_SPEND = 'RECURRING_SPEND',
   MERCHANT_DEPENDENCY = 'MERCHANT_DEPENDENCY',
   ESCALATING_SPEND = 'ESCALATING_SPEND',
+  SEQUENCE_PATTERN = 'SEQUENCE_PATTERN',
 }
 
 /**
@@ -666,6 +667,7 @@ export interface DetectedHabit {
   id: string;
   user_id: string;
   habit_type: HabitType;
+  pattern_key: string;
   title: string;
   description: string;
   frequency: 'daily' | 'weekly' | 'monthly' | 'occasional';
@@ -691,6 +693,15 @@ export interface DetectedHabit {
   streak_start?: string | null;
   recovery_started_at?: string | null;
   peak_monthly_impact?: number | null;
+  is_emerging?: boolean;
+  sequence_context?: {
+    trigger_merchant?: string;
+    trigger_category?: string;
+    outcome_merchant?: string;
+    outcome_category?: string;
+    avg_hours_between?: number;
+    occurrences?: number;
+  } | null;
   created_at: string;
   updated_at: string;
 }
@@ -751,6 +762,7 @@ export interface NarrativeUnit {
     id: string;
     merchant: string;
     amount: number;
+    isCredit: boolean;   // true = money in (payment received, refund)
     category: string;
   };
 

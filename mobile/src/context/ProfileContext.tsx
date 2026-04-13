@@ -1,7 +1,8 @@
-import React, { createContext, useContext, useState, useEffect, useRef, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback, ReactNode } from 'react';
 import { AppState, AppStateStatus } from 'react-native';
 import { Account, MonthlySpending } from '../types';
 import { getToken, syncTransactions } from '../services/api';
+import { useAuth } from './AuthContext';
 
 interface AppContextType {
   accounts: Account[];
@@ -15,6 +16,7 @@ interface AppContextType {
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
+  const { isAuthenticated } = useAuth();
   const [accounts, setAccountsState] = useState<Account[]>([]);
   const [monthlySpending, setMonthlySpendingState] = useState<MonthlySpending | null>(null);
 
@@ -30,7 +32,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setMonthlySpendingState(spending);
   };
 
-  const refreshAccounts = async () => {
+  const refreshAccounts = useCallback(async () => {
     try {
       const token = await getToken();
       if (!token) return; // Not logged in
@@ -59,12 +61,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     } catch (error) {
       console.error('Error refreshing accounts:', error);
     }
-  };
-
-  // Load accounts on mount
-  useEffect(() => {
-    refreshAccounts();
   }, []);
+
+  // Re-fetch accounts whenever the user logs in or out
+  useEffect(() => {
+    if (isAuthenticated) {
+      refreshAccounts();
+    } else {
+      setAccountsState([]);
+    }
+  }, [isAuthenticated, refreshAccounts]);
 
   // Silent background sync whenever the app comes to the foreground
   const appState = useRef(AppState.currentState);
@@ -84,7 +90,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
     });
     return () => subscription.remove();
-  }, []);
+  }, [refreshAccounts]);
 
   return (
     <AppContext.Provider

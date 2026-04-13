@@ -9,7 +9,6 @@ import {
   LearnedPattern,
 } from '../models/types';
 import { PatternLearningService } from './patternLearningService';
-import { DataQualityService } from './dataQualityService';
 import { resolveTransactionTime } from './timeResolver';
 
 /**
@@ -31,13 +30,16 @@ export class HabitDetectionService {
 
   // Merchant patterns for habit detection
   private readonly FOOD_DELIVERY_MERCHANTS = [
-    'doordash', 'uber eats', 'ubereats', 'grubhub', 'postmates',
-    'seamless', 'caviar', 'instacart',
+    'doordash', 'door dash', 'uber eats', 'ubereats', 'grubhub', 'postmates',
+    'seamless', 'caviar', 'instacart', 'gopuff', 'go puff', 'factor',
+    'hello fresh', 'hellofresh', 'freshly', 'sunbasket', 'everytable',
   ];
 
   private readonly COFFEE_MERCHANTS = [
-    'starbucks', 'dunkin', 'peets', 'blue bottle', 'philz',
-    'coffee bean', 'dutch bros', 'caribou',
+    'starbucks', 'dunkin', 'dunkin donuts', 'peets', "peet's", 'blue bottle',
+    'philz', 'coffee bean', 'dutch bros', 'caribou', 'tim hortons',
+    'biggby', 'scooters coffee', 'seven brew', '7 brew', 'black rock coffee',
+    'human bean', 'coffee',
   ];
 
   private readonly IMPULSE_CATEGORIES: TransactionCategory[] = [
@@ -45,12 +47,9 @@ export class HabitDetectionService {
     TransactionCategory.ENTERTAINMENT,
   ];
 
-  private dqService: DataQualityService;
-
   constructor(pool: Pool) {
     this.pool = pool;
     this.patternLearningService = new PatternLearningService(pool);
-    this.dqService = new DataQualityService(pool);
   }
 
   /**
@@ -59,18 +58,15 @@ export class HabitDetectionService {
   async detectHabits(userId: string, days: number = 90): Promise<DetectedHabit[]> {
     const transactions = await this.getUserTransactions(userId, days);
 
-    if (transactions.length < 3) {
-      return []; // Not enough data for detection
+    if (transactions.length < 2) {
+      return [];
     }
 
-    // Late-night detector only needs any resolvable time on at least one tx.
-    // detectLateNightSpending handles the check itself via resolveTransactionTime.
     const hasAnyTimeData = transactions.some(
       (tx) => tx.user_time_of_day || tx.inferred_time_of_day || tx.pending_captured_at
     );
 
-    const habits: DetectedHabit[] = [];
-
+    // ── Run all detectors in parallel ────────────────────────────────────────
     const [
       lateNightHabit,
       weekendHabit,
@@ -80,6 +76,7 @@ export class HabitDetectionService {
       foodDeliveryHabit,
       caffeineHabit,
       bingeHabit,
+      merchantFreqHabits,
     ] = await Promise.all([
       hasAnyTimeData
         ? this.detectLateNightSpending(userId, transactions)
@@ -91,54 +88,133 @@ export class HabitDetectionService {
       this.detectFoodDeliveryHabit(userId, transactions),
       this.detectCaffeineRitual(userId, transactions),
       this.detectBingeShopping(userId, transactions),
+      this.detectMerchantFrequency(userId, transactions),
     ]);
 
     const stressHabit = await this.detectStressSpendingDays(userId, transactions);
 
-    // Algorithmic engines
-    const [recurringHabits, dependencyHabits, escalatingHabits] = await Promise.all([
+    const [recurringHabits, dependencyHabits, escalatingHabits, sequenceHabits] = await Promise.all([
       this.detectRecurringPatterns(userId, transactions),
       this.detectMerchantDependency(userId, transactions),
       this.detectEscalatingPatterns(userId, transactions),
+      this.detectSequencePatterns(userId, transactions),
     ]);
 
-    if (lateNightHabit) habits.push(lateNightHabit);
-    if (weekendHabit) habits.push(weekendHabit);
-    habits.push(...weeklyRituals);
-    habits.push(...impulseHabits);
-    if (postPaydayHabit) habits.push(postPaydayHabit);
-    if (foodDeliveryHabit) habits.push(foodDeliveryHabit);
-    if (caffeineHabit) habits.push(caffeineHabit);
-    if (bingeHabit) habits.push(bingeHabit);
-    if (stressHabit) habits.push(stressHabit);
-    habits.push(...recurringHabits);
-    habits.push(...dependencyHabits);
-    habits.push(...escalatingHabits);
+    const raw: DetectedHabit[] = [
+      lateNightHabit,
+      weekendHabit,
+      stressHabit,
+      postPaydayHabit,
+      foodDeliveryHabit,
+      caffeineHabit,
+      bingeHabit,
+    ].filter(Boolean) as DetectedHabit[];
 
-    // Score each pattern and attach quality metadata
-    for (const habit of habits) {
-      const sampleTxs = (habit.sample_transactions || []).map((e) => ({
-        id: e.transaction_id,
-        account_id: '',
-        amount: e.amount,
-        date: e.date,
-        name: e.merchant_name || '',
-        is_pending: false,
-        pending_captured_at: null,
-        category: e.category as any,
-        merchant_name: e.merchant_name || undefined,
-      }));
+    raw.push(
+      ...weeklyRituals,
+      ...impulseHabits,
+      ...recurringHabits,
+      ...dependencyHabits,
+      ...escalatingHabits,
+      ...sequenceHabits,
+      ...merchantFreqHabits,
+    );
 
-      const quality = await this.dqService.scorePattern(sampleTxs, null);
-      habit.data_quality_score = quality.score;
-      habit.confidence_reason = quality.reason;
+    // ── Fetch which habit_types have reflection answers ───────────────────────
+    // Join user_responses → detected_habits by pattern_id to get habit_type+pattern_key
+    const reflectionAnswers = await this.pool.query<{ habit_type: string; pattern_key: string }>(
+      `SELECT dh.habit_type, dh.pattern_key
+       FROM user_responses ur
+       JOIN detected_habits dh ON dh.id = ur.pattern_id
+       WHERE ur.user_id = $1 AND ur.answered_at IS NOT NULL AND ur.answer IS NOT NULL`,
+      [userId]
+    );
+    // Key: habit_type:pattern_key
+    const reflectedKeys = new Set(
+      reflectionAnswers.rows.map((r) => `${r.habit_type}:${r.pattern_key}`)
+    );
+
+    // ── Score and label each pattern ──────────────────────────────────────────
+    const now = Date.now();
+    for (const habit of raw) {
+      habit.data_quality_score = this.scorePattern(habit, now, reflectedKeys);
+      habit.is_emerging = habit.occurrence_count <= 2;
     }
 
-    await this.saveHabits(userId, habits);
+    // ── Deduplicate by merchant ────────────────────────────────────────────────
+    // Multiple detectors can fire on the same merchant (e.g. Amazon gets
+    // WEEKLY_RITUAL + MERCHANT_DEPENDENCY + ESCALATING_SPEND). Keep only the
+    // most behaviorally specific type per merchant.
+    //
+    // Priority (higher = more specific, wins):
+    //   5 WEEKLY_RITUAL      — same merchant, same weekday = clearest habit
+    //   4 SEQUENCE_PATTERN   — causal chain detected
+    //   3 ESCALATING_SPEND   — trend signal
+    //   2 RECURRING_SPEND    — rhythm signal
+    //   1 MERCHANT_DEPENDENCY — frequency catch-all
+    //
+    // Behavioral types (IMPULSE, BINGE, etc.) have no merchant key → kept as-is.
+    const MERCHANT_PRIORITY: Partial<Record<HabitType, number>> = {
+      [HabitType.WEEKLY_RITUAL]:       5,
+      [HabitType.SEQUENCE_PATTERN]:    4,
+      [HabitType.ESCALATING_SPEND]:    3,
+      [HabitType.RECURRING_SPEND]:     2,
+      [HabitType.MERCHANT_DEPENDENCY]: 1,
+    };
 
-    // Return the DB-persisted rows so callers get real IDs and a deduplicated set
+    // Extract primary merchant slug from a habit's pattern_key.
+    // Re-normalizes so "paramount" and "paramount+" map to the same slug.
+    const merchantSlug = (h: DetectedHabit): string | null => {
+      if (!(h.habit_type in MERCHANT_PRIORITY)) return null; // behavioral — no merchant key
+      if (h.habit_type === HabitType.SEQUENCE_PATTERN) return null; // keep sequences always
+      // Strip day suffix from weekly ritual keys like "amazon:2" or "claude.ai:5"
+      const base = (h.pattern_key ?? '').split(':')[0].split('→')[0];
+      // Re-normalize to collapse variants like "paramount+" → "paramount"
+      return this.normalizeMerchant(base) || null;
+    };
+
+    const byMerchant = new Map<string, DetectedHabit>();
+    const nonMerchant: DetectedHabit[] = [];
+
+    for (const h of raw) {
+      const slug = merchantSlug(h);
+      if (!slug) {
+        nonMerchant.push(h);
+        continue;
+      }
+      const existing = byMerchant.get(slug);
+      if (!existing) {
+        byMerchant.set(slug, h);
+      } else {
+        const newPri = MERCHANT_PRIORITY[h.habit_type] ?? 0;
+        const oldPri = MERCHANT_PRIORITY[existing.habit_type] ?? 0;
+        // Same priority → keep higher score; different → keep higher priority type
+        if (newPri > oldPri || (newPri === oldPri && (h.data_quality_score ?? 0) > (existing.data_quality_score ?? 0))) {
+          byMerchant.set(slug, h);
+        }
+      }
+    }
+
+    const deduped = [...byMerchant.values(), ...nonMerchant];
+
+    // Remove stale DB rows for habits that were deduplicated away
+    const winningKeys = new Set(deduped.map((h) => `${h.habit_type}:${h.pattern_key ?? ''}`));
+    await this.pool.query(
+      `DELETE FROM detected_habits
+       WHERE user_id = $1
+         AND NOT (habit_type::text || ':' || pattern_key) = ANY($2::text[])`,
+      [userId, [...winningKeys]]
+    );
+
+    // ── Sort by score descending, persist all ─────────────────────────────────
+    deduped.sort((a, b) => (b.data_quality_score ?? 0) - (a.data_quality_score ?? 0));
+    await this.saveHabits(userId, deduped);
+
+    // Return the DB-persisted rows so callers get real IDs
     const dbResult = await this.pool.query(
-      `SELECT * FROM detected_habits WHERE user_id = $1 ORDER BY monthly_impact DESC`,
+      `SELECT * FROM detected_habits
+       WHERE user_id = $1
+       ORDER BY data_quality_score DESC NULLS LAST, monthly_impact DESC`,
       [userId]
     );
     return dbResult.rows.map((row) => ({
@@ -148,6 +224,8 @@ export class HabitDetectionService {
       avg_amount: parseFloat(row.avg_amount) || 0,
       trigger_conditions: row.trigger_conditions || {},
       sample_transactions: row.sample_transactions || [],
+      sequence_context: row.sequence_context || null,
+      is_emerging: row.is_emerging ?? false,
     }));
   }
 
@@ -170,7 +248,7 @@ export class HabitDetectionService {
       return resolved.time_of_day === 'night';
     });
 
-    if (lateNightTxs.length < 3) return null;
+    if (lateNightTxs.length < 2) return null;
 
     const totalAmount = lateNightTxs.reduce((sum, tx) => sum + Math.abs(tx.amount), 0);
     const monthlyImpact = totalAmount / this.monthSpan(lateNightTxs);
@@ -209,7 +287,7 @@ export class HabitDetectionService {
       return day >= 1 && day <= 5;
     });
 
-    if (weekendTxs.length < 3 || weekdayTxs.length < 3) return null;
+    if (weekendTxs.length < 2 || weekdayTxs.length < 3) return null;
 
     const weekendTotal = weekendTxs.reduce((sum, tx) => sum + Math.abs(tx.amount), 0);
     const weekdayTotal = weekdayTxs.reduce((sum, tx) => sum + Math.abs(tx.amount), 0);
@@ -221,8 +299,8 @@ export class HabitDetectionService {
     const weekendDailyAvg = weekendTotal / Math.max(weekendDays, 1);
     const weekdayDailyAvg = weekdayTotal / Math.max(weekdayDays, 1);
 
-    // Only flag if weekend spending is significantly higher (30%+)
-    if (weekendDailyAvg < weekdayDailyAvg * 1.3) return null;
+    // Only flag if weekend spending is meaningfully higher (20%+)
+    if (weekendDailyAvg < weekdayDailyAvg * 1.2) return null;
 
     const excessSpending = (weekendDailyAvg - weekdayDailyAvg) * (weekendDays / this.monthSpan(transactions));
     const frequency = this.calculateFrequency(weekendDays, 90);
@@ -273,7 +351,7 @@ export class HabitDetectionService {
     // Find patterns where same merchant appears on same day 3+ times
     for (const [merchant, dayMap] of merchantDayMap) {
       for (const [day, txs] of dayMap) {
-        if (txs.length >= 3) {
+        if (txs.length >= 2) {
           const totalAmount = txs.reduce((sum, tx) => sum + Math.abs(tx.amount), 0);
           const avgAmount = totalAmount / txs.length;
           const dayName = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][day];
@@ -283,6 +361,7 @@ export class HabitDetectionService {
           habits.push(await this.createHabit({
             userId,
             habitType: HabitType.WEEKLY_RITUAL,
+            patternKey: `${merchant}:${day}`,
             title: `${dayName} ${cleanMerchant} Ritual`,
             description: `You visit ${cleanMerchant} almost every ${dayName}. It's become a ritual.`,
             frequency: 'weekly',
@@ -303,7 +382,10 @@ export class HabitDetectionService {
   }
 
   /**
-   * Detect impulse purchases (high variance, shopping/entertainment, unusual amounts)
+   * Detect impulse purchases — purchases that are outliers relative to the
+   * user's personal baseline. Works across ALL categories (not just SHOPPING/
+   * ENTERTAINMENT) because Plaid frequently miscategorizes transactions as OTHER.
+   * Excludes bills, transfers, and subscriptions from the candidate pool.
    */
   private async detectImpulsePurchases(
     userId: string,
@@ -311,39 +393,42 @@ export class HabitDetectionService {
   ): Promise<DetectedHabit[]> {
     const habits: DetectedHabit[] = [];
 
-    // Filter to shopping/entertainment categories
-    const impulseCandidates = transactions.filter(
-      (tx) => tx.category && this.IMPULSE_CATEGORIES.includes(tx.category)
+    // Exclude recurring/bill-like categories — we want spontaneous spend
+    const excluded = new Set([
+      TransactionCategory.BILLS,
+      TransactionCategory.TRANSFER,
+      TransactionCategory.HEALTHCARE,
+    ]);
+    const candidates = transactions.filter(
+      (tx) => !tx.category || !excluded.has(tx.category)
     );
 
-    if (impulseCandidates.length < 3) return habits;
+    if (candidates.length < 2) return habits;
 
-    // Calculate average and standard deviation
-    const amounts = impulseCandidates.map((tx) => Math.abs(tx.amount));
+    const amounts = candidates.map((tx) => Math.abs(tx.amount));
     const avg = amounts.reduce((a, b) => a + b, 0) / amounts.length;
-    const variance = amounts.reduce((sum, amt) => sum + Math.pow(amt - avg, 2), 0) / amounts.length;
-    const stdDev = Math.sqrt(variance);
+    const stdDev = Math.sqrt(
+      amounts.reduce((sum, a) => sum + Math.pow(a - avg, 2), 0) / amounts.length
+    );
 
-    // Transactions significantly above average are potential impulse purchases
-    const impulseTxs = impulseCandidates.filter(
-      (tx) => Math.abs(tx.amount) > avg + stdDev
+    // Flag transactions > 1.5x avg AND > avg + 0.8 std dev (catches spike even in low-variance data)
+    const threshold = Math.min(avg * 1.5, avg + stdDev * 0.8);
+    const impulseTxs = candidates.filter(
+      (tx) => Math.abs(tx.amount) > threshold && Math.abs(tx.amount) > 20
     );
 
     if (impulseTxs.length >= 2) {
       const totalImpulse = impulseTxs.reduce((sum, tx) => sum + Math.abs(tx.amount), 0);
-
       habits.push(await this.createHabit({
         userId,
         habitType: HabitType.IMPULSE_PURCHASE,
-        title: 'Impulse Buyer',
-        description: `You have ${impulseTxs.length} purchases that are significantly higher than your usual spending. These might be impulse buys.`,
+        title: 'Impulse Spending',
+        description: `${impulseTxs.length} purchases stood out as higher than your usual spending — averaging $${(totalImpulse / impulseTxs.length).toFixed(0)} each vs your typical $${avg.toFixed(0)}.`,
         frequency: this.calculateFrequency(impulseTxs.length, 90),
         monthlyImpact: totalImpulse / this.monthSpan(impulseTxs),
         occurrenceCount: impulseTxs.length,
         avgAmount: totalImpulse / impulseTxs.length,
-        triggerConditions: {
-          categories: this.IMPULSE_CATEGORIES,
-        },
+        triggerConditions: { categories: this.IMPULSE_CATEGORIES },
         transactions: impulseTxs,
       }));
     }
@@ -408,7 +493,7 @@ export class HabitDetectionService {
       return this.FOOD_DELIVERY_MERCHANTS.some((m) => merchant.includes(m));
     });
 
-    if (deliveryTxs.length < 3) return null;
+    if (deliveryTxs.length < 2) return null;
 
     const totalAmount = deliveryTxs.reduce((sum, tx) => sum + Math.abs(tx.amount), 0);
     const monthlyImpact = totalAmount / this.monthSpan(deliveryTxs);
@@ -447,7 +532,7 @@ export class HabitDetectionService {
       return this.COFFEE_MERCHANTS.some((m) => merchant.includes(m));
     });
 
-    if (coffeeTxs.length < 4) return null;
+    if (coffeeTxs.length < 2) return null;
 
     const totalAmount = coffeeTxs.reduce((sum, tx) => sum + Math.abs(tx.amount), 0);
     const monthlyImpact = totalAmount / this.monthSpan(coffeeTxs);
@@ -492,11 +577,11 @@ export class HabitDetectionService {
       byDate.get(date)!.push(tx);
     }
 
-    // Find days with 4+ spending transactions (any category)
+    // Find days with 3+ spending transactions (any category)
     const bingeDays: { date: string; txs: Transaction[] }[] = [];
 
     for (const [date, txs] of byDate) {
-      if (txs.length >= 4) {
+      if (txs.length >= 2) {
         bingeDays.push({ date, txs });
       }
     }
@@ -546,8 +631,8 @@ export class HabitDetectionService {
         const cat = tx.category ?? 'OTHER';
         byCat.set(cat, (byCat.get(cat) ?? 0) + 1);
       }
-      // Stress day: 2+ categories each with 2+ transactions
-      const activeCats = [...byCat.values()].filter((n) => n >= 2).length;
+      // Stress day: 2+ categories each with 1+ transactions (on same day)
+      const activeCats = [...byCat.entries()].filter(([cat, n]) => cat !== 'OTHER' && n >= 1).length;
       if (activeCats >= 2) {
         stressDays.push({ date, txs, categoryCount: activeCats });
       }
@@ -607,7 +692,7 @@ export class HabitDetectionService {
     const habits: DetectedHabit[] = [];
 
     for (const [merchantKey, txs] of byMerchant) {
-      if (txs.length < 3) continue;
+      if (txs.length < 2) continue;
 
       const sorted = [...txs].sort(
         (a, b) => this.toDate(a.date).getTime() - this.toDate(b.date).getTime()
@@ -638,7 +723,18 @@ export class HabitDetectionService {
 
       const totalAmount = txs.reduce((s, t) => s + Math.abs(t.amount), 0);
       const avgAmount = totalAmount / txs.length;
-      const monthlyImpact = totalAmount / this.monthSpan(txs);
+
+      // Skip pure subscription billing (near-identical amounts, very rigid interval).
+      // These are payment schedules, not behavioral patterns.
+      const amounts = txs.map((t) => Math.abs(t.amount));
+      const amountMean = avgAmount;
+      const amountCv = amountMean > 0
+        ? Math.sqrt(amounts.reduce((s, a) => s + Math.pow(a - amountMean, 2), 0) / amounts.length) / amountMean
+        : 0;
+      if (amountCv < 0.05 && cv < 0.2) continue; // fixed amount + rigid schedule = subscription
+      // Use the detected rhythm (avgAmount × how many times per month) rather than
+      // total/span, which inflates the figure when several transactions cluster early.
+      const monthlyImpact = avgAmount * (30 / medianGap);
       const displayName = this.cleanMerchantName(merchantKey);
 
       const intervalLabels: Record<string, string> = {
@@ -652,6 +748,7 @@ export class HabitDetectionService {
         await this.createHabit({
           userId,
           habitType: HabitType.RECURRING_SPEND,
+          patternKey: merchantKey,
           title: `Recurring ${displayName} Payments`,
           description: `You spend at ${displayName} ${intervalLabels[interval]}, averaging $${avgAmount.toFixed(0)} each time. This has become a reliable spending rhythm.`,
           frequency: interval === 'daily' ? 'daily' : interval === 'weekly' ? 'weekly' : 'monthly',
@@ -711,7 +808,7 @@ export class HabitDetectionService {
     const habits: DetectedHabit[] = [];
 
     for (const [merchantKey, { txs, total, category }] of byMerchant) {
-      if (txs.length < 3) continue;
+      if (txs.length < 2) continue;
 
       const shareOfTotal = total / totalSpend;
       const catTotal = category ? (byCat.get(category) ?? 0) : 0;
@@ -737,6 +834,7 @@ export class HabitDetectionService {
         await this.createHabit({
           userId,
           habitType: HabitType.MERCHANT_DEPENDENCY,
+          patternKey: merchantKey,
           title: `${displayName} Dependency`,
           description,
           frequency: this.calculateFrequency(txs.length, 90),
@@ -813,12 +911,13 @@ export class HabitDetectionService {
 
       if (!priorData) {
         // Newly emerging — only appears in recent half
-        if (recentData.txs.length < 3) continue;
+        if (recentData.txs.length < 2) continue;
         const monthlyImpact = recentRate;
         habits.push(
           await this.createHabit({
             userId,
             habitType: HabitType.ESCALATING_SPEND,
+            patternKey: merchantKey,
             title: `New ${displayName} Habit`,
             description: `You've started spending at ${displayName} regularly — ${recentData.txs.length} times recently with no history before. New habits form fast.`,
             frequency: this.calculateFrequency(recentData.txs.length, 45),
@@ -843,6 +942,7 @@ export class HabitDetectionService {
           await this.createHabit({
             userId,
             habitType: HabitType.ESCALATING_SPEND,
+            patternKey: merchantKey,
             title: `Rising ${displayName} Spend`,
             description: `Your spending at ${displayName} is up ${pctIncrease}% compared to the previous period. This pattern is accelerating.`,
             frequency: this.calculateFrequency(recentData.txs.length, 45),
@@ -859,6 +959,263 @@ export class HabitDetectionService {
     return habits
       .sort((a, b) => b.monthly_impact - a.monthly_impact)
       .slice(0, 4);
+  }
+
+  // ─── Engine 4: Sequence Detection ────────────────────────────────────────
+  //
+  // Finds causal chains: event A repeatedly precedes event B within a time
+  // window. Examples: gym → food delivery, payday → Amazon splurge,
+  // late night → fast food.
+  //
+  // Method:
+  //   1. Sort all transactions by timestamp.
+  //   2. For each transaction (the "trigger"), look ahead up to WINDOW_HOURS
+  //      for a different-merchant transaction (the "outcome").
+  //   3. Accumulate (trigger_key, outcome_key) pairs.
+  //   4. Flag pairs that repeat 3+ times as a sequence pattern.
+
+  private async detectSequencePatterns(
+    userId: string,
+    transactions: Transaction[]
+  ): Promise<DetectedHabit[]> {
+    const WINDOW_HOURS = 24; // look-ahead window
+    const MIN_OCCURRENCES = 2;
+
+    // Only use transactions with a reliable date (all of them); sort ascending
+    const sorted = [...transactions].sort(
+      (a, b) => this.toDate(a.date).getTime() - this.toDate(b.date).getTime()
+    );
+
+    // Build category/merchant label for each tx
+    const label = (tx: Transaction): string => {
+      const m = this.normalizeMerchant(tx.merchant_name || tx.name);
+      return m || (tx.category?.toLowerCase() ?? 'unknown');
+    };
+
+    // Count (trigger_label → outcome_label) pairs
+    const pairCounts = new Map<
+      string,
+      {
+        count: number;
+        triggerMerchant: string;
+        outcomeMerchant: string;
+        triggerCategory: string | null;
+        outcomeCategory: string | null;
+        totalOutcomeAmount: number;
+        outcomeTxs: Transaction[];
+        triggerTxs: Transaction[];
+        hourDeltas: number[];
+      }
+    >();
+
+    for (let i = 0; i < sorted.length; i++) {
+      const trigger = sorted[i];
+      const triggerTime = this.toDate(trigger.date).getTime();
+
+      for (let j = i + 1; j < sorted.length; j++) {
+        const outcome = sorted[j];
+        const outcomeTime = this.toDate(outcome.date).getTime();
+        const hoursApart = (outcomeTime - triggerTime) / (1000 * 60 * 60);
+
+        if (hoursApart > WINDOW_HOURS) break;
+        if (hoursApart < 0.25) continue; // same transaction burst, skip
+
+        const tLabel = label(trigger);
+        const oLabel = label(outcome);
+        if (tLabel === oLabel) continue; // same merchant, not a sequence
+
+        const key = `${tLabel}→${oLabel}`;
+        if (!pairCounts.has(key)) {
+          pairCounts.set(key, {
+            count: 0,
+            triggerMerchant: trigger.merchant_name || trigger.name,
+            outcomeMerchant: outcome.merchant_name || outcome.name,
+            triggerCategory: trigger.category ?? null,
+            outcomeCategory: outcome.category ?? null,
+            totalOutcomeAmount: 0,
+            outcomeTxs: [],
+            triggerTxs: [],
+            hourDeltas: [],
+          });
+        }
+        const entry = pairCounts.get(key)!;
+        entry.count++;
+        entry.totalOutcomeAmount += Math.abs(outcome.amount);
+        entry.outcomeTxs.push(outcome);
+        entry.triggerTxs.push(trigger);
+        entry.hourDeltas.push(hoursApart);
+      }
+    }
+
+    const habits: DetectedHabit[] = [];
+
+    for (const [, entry] of pairCounts) {
+      if (entry.count < MIN_OCCURRENCES) continue;
+
+      const avgHours = entry.hourDeltas.reduce((a, b) => a + b, 0) / entry.hourDeltas.length;
+      const avgOutcome = entry.totalOutcomeAmount / entry.count;
+      const monthlyImpact = (entry.totalOutcomeAmount / this.monthSpan(entry.outcomeTxs));
+
+      const triggerName = this.cleanMerchantName(this.normalizeMerchant(entry.triggerMerchant));
+      const outcomeName = this.cleanMerchantName(this.normalizeMerchant(entry.outcomeMerchant));
+
+      const timeDesc = avgHours < 2
+        ? 'shortly after'
+        : avgHours < 6
+          ? 'a few hours after'
+          : 'later in the day after';
+
+      const patternKey = `${this.normalizeMerchant(entry.triggerMerchant)}→${this.normalizeMerchant(entry.outcomeMerchant)}`;
+
+      habits.push(
+        await this.createHabit({
+          userId,
+          habitType: HabitType.SEQUENCE_PATTERN,
+          patternKey,
+          title: `${triggerName} → ${outcomeName}`,
+          description: `${outcomeName} spending tends to follow ${triggerName} — this has happened ${entry.count} times, ${timeDesc} ${triggerName}, averaging $${avgOutcome.toFixed(0)} each time.`,
+          frequency: this.calculateFrequency(entry.count, 90),
+          monthlyImpact,
+          occurrenceCount: entry.count,
+          avgAmount: avgOutcome,
+          triggerConditions: {
+            merchants: [entry.triggerMerchant, entry.outcomeMerchant],
+          },
+          transactions: entry.outcomeTxs,
+        })
+      );
+
+      // Attach sequence context
+      habits[habits.length - 1].sequence_context = {
+        trigger_merchant: entry.triggerMerchant,
+        outcome_merchant: entry.outcomeMerchant,
+        trigger_category: entry.triggerCategory ?? undefined,
+        outcome_category: entry.outcomeCategory ?? undefined,
+        avg_hours_between: Math.round(avgHours * 10) / 10,
+        occurrences: entry.count,
+      };
+    }
+
+    // Deduplicate: if A→B and A→C both fired, keep only the strongest outcome per trigger
+    const byTrigger = new Map<string, DetectedHabit>();
+    for (const h of habits) {
+      const triggerKey = h.sequence_context?.trigger_merchant ?? '';
+      const existing = byTrigger.get(triggerKey);
+      if (!existing || h.monthly_impact > existing.monthly_impact) {
+        byTrigger.set(triggerKey, h);
+      }
+    }
+
+    return [...byTrigger.values()]
+      .sort((a, b) => b.monthly_impact - a.monthly_impact)
+      .slice(0, 5);
+  }
+
+  // ─── Engine 5: Merchant Frequency ────────────────────────────────────────
+  //
+  // Surfaces any merchant the user has visited 2+ times — no category needed,
+  // no timestamp needed. This is the lowest-friction pattern: pure repetition.
+  // Behavioral detectors handle the "why"; this handles the "what keeps showing up".
+  // Skips merchants already covered by food delivery / caffeine detectors.
+
+  private async detectMerchantFrequency(
+    userId: string,
+    transactions: Transaction[]
+  ): Promise<DetectedHabit[]> {
+    const byMerchant = new Map<string, Transaction[]>();
+    for (const tx of transactions) {
+      const key = this.normalizeMerchant(tx.merchant_name || tx.name);
+      if (!key) continue;
+      if (!byMerchant.has(key)) byMerchant.set(key, []);
+      byMerchant.get(key)!.push(tx);
+    }
+
+    // Already covered by dedicated detectors — skip to avoid duplicates
+    const coveredByOtherDetector = (key: string) =>
+      this.FOOD_DELIVERY_MERCHANTS.some((m) => key.includes(m)) ||
+      this.COFFEE_MERCHANTS.some((m) => key.includes(m));
+
+    const habits: DetectedHabit[] = [];
+
+    for (const [merchantKey, txs] of byMerchant) {
+      if (txs.length < 2) continue;
+      if (coveredByOtherDetector(merchantKey)) continue;
+
+      const sorted = [...txs].sort(
+        (a, b) => this.toDate(b.date).getTime() - this.toDate(a.date).getTime()
+      );
+      const totalAmount = txs.reduce((s, t) => s + Math.abs(t.amount), 0);
+      const avgAmount = totalAmount / txs.length;
+      const monthlyImpact = totalAmount / Math.max(this.monthSpan(txs), 0.5);
+      const displayName = this.cleanMerchantName(merchantKey);
+
+      // Recency signal: was this merchant active in the last 14 days?
+      const cutoff = Date.now() - 14 * 24 * 3600 * 1000;
+      const recentCount = txs.filter((t) => this.toDate(t.date).getTime() > cutoff).length;
+      const isRecent = recentCount > 0;
+
+      habits.push(
+        await this.createHabit({
+          userId,
+          habitType: HabitType.MERCHANT_DEPENDENCY,
+          patternKey: merchantKey,
+          title: `${displayName} Habit`,
+          description: `You've spent at ${displayName} ${txs.length} times${isRecent ? ', including recently' : ''}. Averaging $${avgAmount.toFixed(0)} each visit.`,
+          frequency: this.calculateFrequency(txs.length, 90),
+          monthlyImpact,
+          occurrenceCount: txs.length,
+          avgAmount,
+          triggerConditions: { merchants: [merchantKey] },
+          transactions: sorted,
+        })
+      );
+    }
+
+    // Sort by occurrence count (most frequent first), return top 8
+    return habits
+      .sort((a, b) => b.occurrence_count - a.occurrence_count)
+      .slice(0, 8);
+  }
+
+  // ─── Pattern scoring ──────────────────────────────────────────────────────
+  //
+  // score = frequency_weight (0–40)
+  //       + recency_weight   (0–30)
+  //       + consistency      (0–20)
+  //       + reflection_bonus (0–10)
+  //
+  // Patterns below 20 are considered emerging.
+
+  private scorePattern(
+    habit: DetectedHabit,
+    nowMs: number,
+    reflectedKeys: Set<string>
+  ): number {
+    // 1. Frequency — how many times detected (max out at 10+)
+    const freqScore = Math.min(40, (habit.occurrence_count / 10) * 40);
+
+    // 2. Recency — days since last occurrence (0 days = 30pts, 90 days = 0pts)
+    const lastDate = habit.last_occurrence
+      ? this.toDate(habit.last_occurrence).getTime()
+      : nowMs - 90 * 24 * 3600 * 1000;
+    const daysSinceLast = (nowMs - lastDate) / (1000 * 60 * 60 * 24);
+    const recencyScore = Math.max(0, 30 - (daysSinceLast / 90) * 30);
+
+    // 3. Amount consistency — lower CV = more consistent = more intentional
+    const sampleAmounts = (habit.sample_transactions || []).map((t) => Math.abs(t.amount));
+    let consistencyScore = 10; // default mid
+    if (sampleAmounts.length >= 2) {
+      const mean = sampleAmounts.reduce((a, b) => a + b, 0) / sampleAmounts.length;
+      const cv = mean > 0
+        ? Math.sqrt(sampleAmounts.reduce((s, a) => s + Math.pow(a - mean, 2), 0) / sampleAmounts.length) / mean
+        : 1;
+      consistencyScore = Math.round(Math.max(0, 20 * (1 - cv)));
+    }
+
+    // 4. Reflection bonus — user has answered a question about this pattern
+    const reflectionBonus = reflectedKeys.has(`${habit.habit_type}:${habit.pattern_key ?? ''}`) ? 10 : 0;
+
+    return Math.round(freqScore + recencyScore + consistencyScore + reflectionBonus);
   }
 
   // ─── Utility helpers for algorithmic engines ─────────────────────────────
@@ -1199,6 +1556,7 @@ export class HabitDetectionService {
   private async createHabit(params: {
     userId: string;
     habitType: HabitType;
+    patternKey?: string;
     title: string;
     description: string;
     frequency: 'daily' | 'weekly' | 'monthly' | 'occasional';
@@ -1220,6 +1578,7 @@ export class HabitDetectionService {
       id: '', // Will be set when saving to DB
       user_id: params.userId,
       habit_type: params.habitType,
+      pattern_key: params.patternKey ?? '',
       title: params.title,
       description: params.description,
       frequency: params.frequency,
@@ -1252,8 +1611,8 @@ export class HabitDetectionService {
       // 4. Compute recovery — fetch existing peak from DB first
       const existing = await this.pool.query(
         `SELECT peak_monthly_impact FROM detected_habits
-         WHERE user_id = $1 AND habit_type = $2`,
-        [userId, habit.habit_type]
+         WHERE user_id = $1 AND habit_type = $2 AND pattern_key = $3`,
+        [userId, habit.habit_type, habit.pattern_key ?? '']
       );
       const existingPeak = existing.rows[0]?.peak_monthly_impact
         ? parseFloat(existing.rows[0].peak_monthly_impact)
@@ -1269,14 +1628,15 @@ export class HabitDetectionService {
       // 5. Upsert into detected_habits with all new fields
       await this.pool.query(
         `INSERT INTO detected_habits
-         (user_id, habit_type, title, description, frequency, monthly_impact, annual_impact,
+         (user_id, habit_type, pattern_key, title, description, frequency, monthly_impact, annual_impact,
           occurrence_count, avg_amount, trigger_conditions, sample_transactions,
           first_detected, last_occurrence, trend, is_acknowledged,
           data_quality_score, confidence_reason,
           streak_count, streak_unit, streak_start,
-          recovery_started_at, peak_monthly_impact)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
-         ON CONFLICT (user_id, habit_type) DO UPDATE SET
+          recovery_started_at, peak_monthly_impact,
+          is_emerging, sequence_context)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+         ON CONFLICT (user_id, habit_type, pattern_key) DO UPDATE SET
            title                = EXCLUDED.title,
            description          = EXCLUDED.description,
            frequency            = EXCLUDED.frequency,
@@ -1298,10 +1658,13 @@ export class HabitDetectionService {
              COALESCE(detected_habits.peak_monthly_impact, 0),
              EXCLUDED.peak_monthly_impact
            ),
+           is_emerging          = EXCLUDED.is_emerging,
+           sequence_context     = EXCLUDED.sequence_context,
            updated_at           = CURRENT_TIMESTAMP`,
         [
           userId,
           habit.habit_type,
+          habit.pattern_key ?? '',
           habit.title,
           habit.description,
           habit.frequency,
@@ -1322,6 +1685,8 @@ export class HabitDetectionService {
           streak.streak_start,
           recovery.recovery_started_at,
           recovery.peak_monthly_impact,
+          habit.is_emerging ?? false,
+          habit.sequence_context ? JSON.stringify(habit.sequence_context) : null,
         ]
       );
     }

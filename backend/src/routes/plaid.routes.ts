@@ -1,6 +1,12 @@
 import { Router, Request, Response } from 'express';
 import { Pool } from 'pg';
 import { authMiddleware } from '../middleware/auth';
+import { validateBody } from '../middleware/validate';
+import {
+  exchangeTokenSchema,
+  syncAccountsSchema,
+  syncTransactionsSchema,
+} from '../validators/plaid.validators';
 import {
   createLinkToken,
   exchangePublicToken,
@@ -88,7 +94,7 @@ export function createPlaidRoutes(pool: Pool): Router {
    * POST /api/plaid/exchange-token
    * Exchange public token for access token and save Plaid item
    */
-  router.post('/exchange-token', async (req: Request, res: Response) => {
+  router.post('/exchange-token', validateBody(exchangeTokenSchema), async (req: Request, res: Response) => {
     try {
       const userId = req.userId;
       if (!userId) {
@@ -96,9 +102,6 @@ export function createPlaidRoutes(pool: Pool): Router {
       }
 
       const { publicToken } = req.body;
-      if (!publicToken) {
-        return res.status(400).json({ error: 'Public token required' });
-      }
 
       console.log('Exchanging public token for user:', userId);
       const result = await exchangePublicToken(pool, userId, publicToken);
@@ -123,7 +126,7 @@ export function createPlaidRoutes(pool: Pool): Router {
    * POST /api/plaid/sync-accounts
    * Sync accounts for all Plaid items (or a specific one if itemId provided)
    */
-  router.post('/sync-accounts', async (req: Request, res: Response) => {
+  router.post('/sync-accounts', validateBody(syncAccountsSchema), async (req: Request, res: Response) => {
     try {
       const userId = req.userId;
       if (!userId) {
@@ -161,7 +164,7 @@ export function createPlaidRoutes(pool: Pool): Router {
    * POST /api/plaid/sync-transactions
    * Sync transactions for all of a user's Plaid items
    */
-  router.post('/sync-transactions', async (req: Request, res: Response) => {
+  router.post('/sync-transactions', validateBody(syncTransactionsSchema), async (req: Request, res: Response) => {
     try {
       const userId = req.userId;
       if (!userId) {

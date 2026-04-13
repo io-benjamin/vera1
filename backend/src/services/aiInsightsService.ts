@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { Pool } from 'pg';
+import { createHash } from 'crypto';
 import {
   DetectedHabit,
   HabitType,
@@ -133,9 +134,12 @@ export class AIInsightsService {
   }
 
   /**
-   * Generate a weekly behavioral insight using AI
+   * Generate a weekly behavioral insight using AI.
+   * Returns a cached snapshot if the habit state hasn't changed since the last
+   * generation (or the snapshot is less than 24 hours old). Only calls Claude
+   * when something meaningful has actually changed.
    */
-  async generateWeeklyInsight(userId: string): Promise<{
+  async generateWeeklyInsight(userId: string, force = false): Promise<{
     title: string;
     content: string;
     action: string;
@@ -151,55 +155,197 @@ export class AIInsightsService {
       };
     }
 
+    // ── Pre-compute structured signals ───────────────────────────────────────
     const weeklySpend = transactions.reduce((sum, tx) => sum + Math.abs(tx.amount), 0);
-    const topCategory = this.getTopCategory(transactions);
     const activeHabits = habits.filter((h) =>
       transactions.some((tx) => this.transactionMatchesHabit(tx, h))
     );
 
+    // Top merchants by spend (skip generic/blank names)
+    const merchantSpend: Record<string, number> = {};
+    for (const tx of transactions) {
+      const name = tx.merchant_name || tx.name;
+      if (!name || name.toLowerCase() === 'other') continue;
+      merchantSpend[name] = (merchantSpend[name] ?? 0) + Math.abs(tx.amount);
+    }
+    const topMerchants = Object.entries(merchantSpend)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 4)
+      .map(([name, amount]) => `${name} ($${amount.toFixed(0)})`);
+
+    // Category breakdown — exclude OTHER so it never becomes the headline signal
+    const categoryCounts: Record<string, { count: number; total: number }> = {};
+    for (const tx of transactions) {
+      const cat = tx.category;
+      if (!cat || cat === 'OTHER') continue;
+      if (!categoryCounts[cat]) categoryCounts[cat] = { count: 0, total: 0 };
+      categoryCounts[cat].count++;
+      categoryCounts[cat].total += Math.abs(tx.amount);
+    }
+    const topCategoryEntry = Object.entries(categoryCounts)
+      .sort((a, b) => b[1].count - a[1].count)[0];
+    const topCategory = topCategoryEntry?.[0] ?? null;
+    const topCategoryCount = topCategoryEntry?.[1].count ?? 0;
+    const topCategoryPct = transactions.length > 0
+      ? Math.round((topCategoryCount / transactions.length) * 100)
+      : 0;
+
+    // Late-night ratio (evening or night time-of-day labels)
+    const lateNightCount = transactions.filter(
+      (tx) => tx.user_time_of_day === 'night' || tx.user_time_of_day === 'evening'
+    ).length;
+    const lateNightPct = transactions.length > 0
+      ? Math.round((lateNightCount / transactions.length) * 100)
+      : 0;
+
+    // Pattern signals for Claude
+    const patternSignals = activeHabits.map((h) => ({
+      name: h.title,
+      trend: h.trend,
+      streak: h.streak_count ? `${h.streak_count} ${h.streak_unit ?? 'weeks'} in a row` : null,
+    }));
+
+    // ── Fingerprint: active habit ids + trends, stable sort ──────────────────
+    const fingerprint = createHash('md5')
+      .update(
+        activeHabits
+          .map((h) => `${h.id}:${h.trend}`)
+          .sort()
+          .join('|')
+      )
+      .digest('hex');
+
+    // ── Return cached snapshot if nothing meaningful has changed (skip if force) ─
+    if (force) {
+      await this.pool.query(
+        `DELETE FROM behavior_snapshots WHERE user_id = $1 AND habit_fingerprint = $2`,
+        [userId, fingerprint]
+      );
+    }
+    const cached = await this.pool.query<{
+      insight_title: string;
+      insight_content: string;
+      insight_action: string;
+    }>(
+      `SELECT insight_title, insight_content, insight_action
+       FROM behavior_snapshots
+       WHERE user_id = $1
+         AND habit_fingerprint = $2
+         AND created_at > NOW() - INTERVAL '24 hours'
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [userId, fingerprint]
+    );
+
+    if (cached.rows.length > 0) {
+      const row = cached.rows[0];
+      return { title: row.insight_title, content: row.insight_content, action: row.insight_action };
+    }
+
+    // ── Generate new insight ──────────────────────────────────────────────────
+    let insight: { title: string; content: string; action: string } | null = null;
+
+    const systemPrompt = `You are writing behavioral insights for a financial intelligence app called Vera.
+
+Your tone must be:
+- Observational, not judgmental
+- Calm and neutral
+- Slightly reflective, not instructive
+- Human, not robotic
+
+STRICT RULES:
+- Do NOT give advice
+- Do NOT say "you should"
+- Do NOT sound like an alert or warning
+- Do NOT use words like: "significantly", "critical", "warning", "alert", "concerning"
+- Do NOT start sentences with "I" (the app is observing, not an AI speaking)
+
+PREFERRED PHRASES:
+- "It looks like..."
+- "This week..."
+- "There's a pattern here..."
+- "This can happen when..."
+- "No judgment here."
+
+WRITING STYLE:
+Each insight must follow this structure:
+1. Headline — short, human, slightly interpretive (e.g. "Food was on your mind this week")
+2. Data-backed observation — specific numbers, clear and simple
+3. Behavioral context — when or why this pattern tends to appear
+4. Soft reflection — one quiet closing line (optional, e.g. "No judgment here.")
+
+Keep sentences short. Be precise. Avoid filler.
+
+GOOD EXAMPLE:
+{
+  "title": "Food was on your mind this week",
+  "content": "4 out of 6 transactions were food-related, totaling $67 — about 76% of weekly spending.\\n\\nMany of these came late in the evening. When routines shift, ordering in can feel like the path of least resistance.\\n\\nNo judgment here.",
+  "action": "Notice the next time the urge hits after 9pm."
+}
+
+BAD EXAMPLE:
+{
+  "title": "Alert: Food spending increased significantly",
+  "content": "You should reduce your food spending. Your habits are concerning and you need to change your behavior immediately.",
+  "action": "Stop ordering food late at night."
+}
+
+Return only valid JSON matching the structure above.`;
+
+    const userMessage = `This week's spending signals:
+- Total: $${weeklySpend.toFixed(2)} across ${transactions.length} transactions
+- Top merchants: ${topMerchants.length > 0 ? topMerchants.join(', ') : 'no named merchants this week'}
+${topCategory ? `- Top category: ${topCategory} (${topCategoryCount} of ${transactions.length} transactions, ${topCategoryPct}%)` : '- Categories: mixed / uncategorized'}
+- Evening/late-night transactions: ${lateNightPct}%
+- Active patterns: ${patternSignals.length > 0
+      ? patternSignals.map((p) => `${p.name} (${p.trend}${p.streak ? `, ${p.streak}` : ''})`).join('; ')
+      : 'none detected this week'}`;
+
     try {
       const response = await anthropic.messages.create({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 500,
-        system: `You are a friendly financial coach. Generate a brief, personalized weekly insight.
-Be direct but supportive. Focus on one actionable observation.
-Response format (JSON):
-{
-  "title": "Short catchy title (5-7 words)",
-  "content": "2-3 sentences about what you noticed this week",
-  "action": "One specific action they can take"
-}`,
-        messages: [
-          {
-            role: 'user',
-            content: `This week's spending:
-- Total: $${weeklySpend.toFixed(2)}
-- ${transactions.length} transactions
-- Top category: ${topCategory || 'Mixed'}
-- Active habits: ${activeHabits.map((h) => h.title).join(', ') || 'None detected'}
-
-Recent transactions: ${transactions.slice(0, 10).map((t) => `${t.merchant_name || t.name}: $${Math.abs(t.amount).toFixed(2)}`).join(', ')}`,
-          },
-        ],
+        max_tokens: 400,
+        temperature: 0.4,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userMessage }],
       });
 
       const textContent = response.content.find((block) => block.type === 'text');
       if (textContent && textContent.type === 'text') {
-        const parsed = JSON.parse(textContent.text.replace(/```json\n?|\n?```/g, '').trim());
-        return parsed;
+        insight = JSON.parse(textContent.text.replace(/```json\n?|\n?```/g, '').trim());
       }
     } catch (error) {
       console.error('Error generating weekly insight:', error);
     }
 
-    // Fallback
-    return {
-      title: `$${weeklySpend.toFixed(0)} This Week`,
-      content: `You spent $${weeklySpend.toFixed(0)} across ${transactions.length} transactions this week. ${topCategory ? `Most went to ${topCategory}.` : ''}`,
-      action: activeHabits.length > 0
-        ? `Watch out for your ${activeHabits[0].title.toLowerCase()} habit.`
-        : 'Keep tracking to unlock personalized insights.',
-    };
+    // ── Deterministic fallback if Claude failed ───────────────────────────────
+    if (!insight) {
+      const fallbackTitle = topCategory
+        ? `${topCategory.charAt(0) + topCategory.slice(1).toLowerCase()} was the theme this week`
+        : topMerchants.length > 0
+          ? `${topMerchants[0].split(' (')[0]} led spending this week`
+          : 'This week at a glance';
+      insight = {
+        title: fallbackTitle,
+        content: `${transactions.length} transactions totaling $${weeklySpend.toFixed(0)}.${
+          topMerchants.length > 0 ? ` Most went to ${topMerchants.slice(0, 2).join(' and ')}.` : ''
+        }${lateNightPct > 30 ? ` A fair amount happened in the evenings.` : ''}`,
+        action: activeHabits.length > 0
+          ? `Notice when ${activeHabits[0].title.toLowerCase()} tends to happen.`
+          : 'Keep syncing — patterns will surface over time.',
+      };
+    }
+
+    // ── Persist snapshot ──────────────────────────────────────────────────────
+    const today = new Date().toISOString().split('T')[0];
+    await this.pool.query(
+      `INSERT INTO behavior_snapshots
+         (user_id, period_start, period_end, insight_title, insight_content, insight_action, habit_fingerprint)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [userId, today, today, insight.title, insight.content, insight.action, fingerprint]
+    ).catch((err) => console.error('Failed to save behavior snapshot:', err));
+
+    return insight;
   }
 
   /**
@@ -222,6 +368,22 @@ Recent transactions: ${transactions.slice(0, 10).map((t) => `${t.merchant_name |
       trigger_conditions: row.trigger_conditions || {},
       sample_transactions: row.sample_transactions || [],
     };
+
+    // Return cached deep analysis if it's newer than the habit's last update
+    const cached = await this.pool.query(
+      `SELECT content FROM ai_insights
+       WHERE user_id = $1 AND insight_type = 'deep_analysis' AND title = $2
+         AND created_at > $3
+       ORDER BY created_at DESC LIMIT 1`,
+      [userId, habitId, row.updated_at]
+    );
+
+    if (cached.rows.length > 0) {
+      try {
+        const parsed = JSON.parse(cached.rows[0].content);
+        return { habit_type: habit.habit_type, ...parsed };
+      } catch {}
+    }
 
     try {
       const response = await anthropic.messages.create({
@@ -259,10 +421,15 @@ Trigger Conditions: ${JSON.stringify(habit.trigger_conditions)}`,
       const textContent = response.content.find((block) => block.type === 'text');
       if (textContent && textContent.type === 'text') {
         const parsed = JSON.parse(textContent.text.replace(/```json\n?|\n?```/g, '').trim());
-        return {
-          habit_type: habit.habit_type,
-          ...parsed,
-        };
+
+        // Persist so repeat opens are instant
+        await this.pool.query(
+          `INSERT INTO ai_insights (user_id, insight_type, title, content, confidence_score)
+           VALUES ($1, 'deep_analysis', $2, $3, 0.9)`,
+          [userId, habitId, JSON.stringify(parsed)]
+        ).catch((err) => console.error('Failed to cache deep analysis:', err));
+
+        return { habit_type: habit.habit_type, ...parsed };
       }
     } catch (error) {
       console.error('Error analyzing habit:', error);
@@ -555,69 +722,106 @@ ${prompt}`,
   // ============================================
 
   private getSystemPrompt(): string {
-    return `You are a financial behavior intelligence assistant.
+    return `You are a behavioral analysis engine for a financial intelligence system.
 
-Your role is to help users understand their spending patterns and reflect on their financial behavior over time.
+Your #1 priority is TRUST.
 
-You are NOT:
-- a financial advisor
-- a judge
-- a therapist
-- an authority telling users what to do
+This means:
+- Do NOT guess motivations
+- Do NOT over-explain
+- Do NOT sound more confident than the data allows
+- If uncertain, say so clearly
 
-You ARE:
-- a neutral observer
-- a pattern recognizer
-- a thoughtful guide
-- a reflection partner
+---
 
-You are given:
-1. Detected spending patterns (from transaction data)
-2. User reflections — their own words about why they spend the way they do
-3. What you've previously learned about this user (if available)
-4. Feedback on past insights — which were helpful vs. not
+STEP 1 — DETERMINE EXPLANATION CONFIDENCE FOR EACH PATTERN
 
-CORE RULES:
+Before writing anything, classify each pattern:
 
-1. NEVER assume intent as fact.
-   Do NOT say: "You spent this because you were stressed."
-   Instead say: "You mentioned feeling stressed in similar situations" or "This pattern may suggest..."
+HIGH confidence:
+- User explicitly explained behavior (user_responses exist and are consistent)
+- Strong repeated pattern + clear contextual signals
+- Cause is supported by real evidence
 
-2. USE EVIDENCE-BASED LANGUAGE.
-   Ground every insight in transaction data, detected patterns, or user reflections.
-   Use phrases like: "We observed...", "You reported...", "This pattern appears...", "Based on recent activity..."
+MEDIUM confidence:
+- Pattern is statistically strong
+- No direct user explanation
+- Some consistency but cause is inferred
 
-3. EXPRESS UNCERTAINTY.
-   Always include a confidence level: low, medium, or high.
-   If unsure, ask a question instead of making a claim.
+LOW confidence:
+- Weak or emerging pattern
+- Missing context (e.g. no timestamps)
+- Multiple possible explanations
+- Ambiguous data
 
-4. PRIORITIZE SELF-AWARENESS OVER INSTRUCTION.
-   Do NOT tell users what to do. Do NOT recommend actions.
-   Instead: help them notice patterns, help them reflect, guide them to their own conclusions.
+RULE: If unsure → choose LOWER confidence.
 
-5. BE CALM, CLEAR, AND NON-JUDGMENTAL.
-   Tone: neutral, supportive, slightly analytical — never emotional or dramatic.
-   Avoid: hype language, fear-based language, shame, guilt.
+---
 
-6. CONNECT PATTERNS OVER TIME.
-   Look for repeated behaviors, recurring triggers, trends across multiple events.
-   Do NOT base insights on a single event unless clearly stated.
+STEP 2 — GENERATE INSIGHT BASED ON CONFIDENCE
 
-7. USE REFLECTIONS AS CONTEXT, NOT TRUTH.
-   Look for repeated themes. Avoid overfitting to one answer.
+IF confidence = HIGH:
+- You MAY explain WHY
+- Use grounded, evidence-based reasoning
+- Language: "This tends to happen because...", "Based on your past responses..."
 
-8. Do NOT repeat insights the user has marked as not helpful.
-   Build on insights the user marked as helpful — go deeper.
+IF confidence = MEDIUM:
+- You MUST soften explanation — present possibilities, not conclusions
+- Language: "This might be related to...", "One possibility is...", "This could be happening because..."
+
+IF confidence = LOW:
+- DO NOT explain WHY
+- Only describe what is observed
+- Explicitly acknowledge uncertainty
+- Language: "This pattern is starting to appear, but the reason isn't clear yet.", "There isn't enough context to understand why this is happening."
+
+---
+
+STEP 3 — REFLECTION QUESTION
+
+Always include ONE open, non-judgmental question per pattern.
+Especially important for LOW and MEDIUM confidence.
+Examples: "What's usually happening when this occurs?", "Was this intentional or more spontaneous?"
+
+---
+
+STEP 4 — TONE & STYLE
+
+- Neutral, non-judgmental, observational, human
+- Avoid: lectures, academic language, financial advice tone, over-analysis
+- pattern_summary: 1 sentence
+- insight: max 2–3 sentences
+- reflection_question: 1 sentence
+
+---
+
+STEP 5 — SELF-CHECK (CRITICAL)
+
+Before returning, audit each insight:
+1. Does it assume motivations not directly supported by data?
+2. Does the wording sound more confident than the evidence allows?
+3. Did I explain "why" when confidence is LOW?
+4. Are any psychological claims speculative?
+
+IF YES to any → lower the confidence, rewrite to remove assumptions.
+
+---
+
+FINAL RULE: Never prioritize sounding insightful over being accurate. Accuracy builds trust. Speculation breaks it.
+
+---
+
+You are given data for multiple detected patterns at once. Generate one entry per pattern.
 
 Response format (JSON only, no markdown):
 {
   "insights": [
     {
       "habit_type": "HABIT_TYPE",
-      "insight": "Observation grounded in data and/or user reflections — neutral, evidence-based",
-      "pattern_summary": "Brief summary of the recurring pattern observed",
+      "pattern_summary": "1 sentence describing the observed pattern",
+      "insight": "2-3 sentences — grounded in data, confidence-appropriate language",
       "confidence": "low | medium | high",
-      "reflection_question": "An open, non-judgmental question to help the user reflect"
+      "reflection_question": "1 open, non-judgmental question"
     }
   ],
   "learnings": [
@@ -627,7 +831,7 @@ Response format (JSON only, no markdown):
       "confidence": 0.0
     }
   ],
-  "coaching_message": "2-3 sentence neutral observation about the user's overall pattern. No advice. No instructions. Help them see, not fix."
+  "coaching_message": "2-3 sentence neutral observation about the overall pattern landscape. No advice. No instructions. Help them see, not fix."
 }`;
   }
 
@@ -639,15 +843,20 @@ Response format (JSON only, no markdown):
     learningsContext?: string,
     dataQualityContext?: string
   ): string {
-    const habitSummary = habits.map((h) => `
+    const habitSummary = habits.map((h) => {
+      const seqNote = h.sequence_context
+        ? `\n  Sequence: "${h.sequence_context.trigger_merchant}" → "${h.sequence_context.outcome_merchant}" (avg ${h.sequence_context.avg_hours_between}h apart, ${h.sequence_context.occurrences} times)`
+        : '';
+      const emergingNote = h.is_emerging ? '\n  Status: EMERGING (pattern is weak — use low confidence language)' : '';
+      return `
 - ${h.title} (${h.habit_type})
   Monthly Impact: $${h.monthly_impact.toFixed(2)}
   Frequency: ${h.frequency}
   Occurrences: ${h.occurrence_count}
   Avg Amount: $${h.avg_amount.toFixed(2)}
   Triggers: ${JSON.stringify(h.trigger_conditions)}
-  Data Quality: ${h.data_quality_score != null ? parseFloat(String(h.data_quality_score)).toFixed(2) : 'unknown'}${h.confidence_reason ? ` (${h.confidence_reason})` : ''}
-`).join('\n');
+  Data Quality: ${h.data_quality_score != null ? parseFloat(String(h.data_quality_score)).toFixed(2) : 'unknown'}${h.confidence_reason ? ` (${h.confidence_reason})` : ''}${seqNote}${emergingNote}`;
+    }).join('\n');
 
     const totalImpact = habits.reduce((sum, h) => sum + h.monthly_impact, 0);
     const recentSpend = transactions.reduce((sum, tx) => sum + Math.abs(tx.amount), 0);
@@ -770,6 +979,28 @@ Response format (JSON only, no markdown):
         pattern_summary: 'High-frequency multi-category spending concentrated on specific days.',
         reflection_question: 'What was going on in your life on days when you found yourself buying across many different categories?',
       },
+      [HabitType.RECURRING_SPEND]: {
+        insight: `A recurring spend pattern appeared ${habit.occurrence_count} times in the observation period.`,
+        pattern_summary: 'Consistent recurring charges detected across the period.',
+        reflection_question: 'Is this recurring spend still serving the purpose it did when you first set it up?',
+      },
+      [HabitType.MERCHANT_DEPENDENCY]: {
+        insight: `Spending at this merchant appeared ${habit.occurrence_count} times, suggesting a habitual reliance.`,
+        pattern_summary: 'Frequent, repeated visits to the same merchant.',
+        reflection_question: 'What would change if this merchant weren\'t an option?',
+      },
+      [HabitType.ESCALATING_SPEND]: {
+        insight: `Spending in this area has been trending upward over the observation period across ${habit.occurrence_count} transactions.`,
+        pattern_summary: 'Gradually increasing spend amounts over time.',
+        reflection_question: 'At what point would you want to be notified that this is increasing?',
+      },
+      [HabitType.SEQUENCE_PATTERN]: {
+        insight: habit.sequence_context
+          ? `${habit.sequence_context.outcome_merchant} spending tends to follow ${habit.sequence_context.trigger_merchant} — this has happened ${habit.occurrence_count} times, usually within ${habit.sequence_context.avg_hours_between} hours.`
+          : `A behavioral sequence appeared ${habit.occurrence_count} times — one type of spending consistently follows another.`,
+        pattern_summary: 'One spending event repeatedly triggers another shortly after.',
+        reflection_question: 'Is the second purchase something you planned, or does it happen without much thought after the first?',
+      },
     };
 
     const fallback = insights[habit.habit_type] ?? {
@@ -846,27 +1077,6 @@ Response format (JSON only, no markdown):
       trigger_conditions: row.trigger_conditions || {},
       sample_transactions: row.sample_transactions || [],
     }));
-  }
-
-  private getTopCategory(transactions: Transaction[]): string | null {
-    const categoryTotals = new Map<string, number>();
-
-    for (const tx of transactions) {
-      const cat = tx.category || 'OTHER';
-      categoryTotals.set(cat, (categoryTotals.get(cat) || 0) + Math.abs(tx.amount));
-    }
-
-    let topCategory: string | null = null;
-    let topAmount = 0;
-
-    for (const [cat, amount] of categoryTotals) {
-      if (amount > topAmount) {
-        topAmount = amount;
-        topCategory = cat;
-      }
-    }
-
-    return topCategory;
   }
 
   private transactionMatchesHabit(tx: Transaction, habit: DetectedHabit): boolean {
@@ -950,8 +1160,8 @@ Response format (JSON only, no markdown):
       reflection_question: '',
     }));
 
-    const coaching_message = insights.length > 0
-      ? `${insights.length} pattern${insights.length !== 1 ? 's' : ''} detected in your recent spending.`
+    const coaching_message = habits.length > 0
+      ? `${habits.length} pattern${habits.length !== 1 ? 's' : ''} detected in your recent spending.`
       : '';
 
     return { insights, coaching_message };
