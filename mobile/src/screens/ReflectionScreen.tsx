@@ -13,7 +13,7 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
-import { useNavigation, useFocusEffect } from '@react-navigation/native';
+import { useNavigation } from '@react-navigation/native';
 import { StackNavigationProp } from '@react-navigation/stack';
 import { colors } from '../theme/colors';
 import { fonts, typography } from '../theme/typography';
@@ -97,7 +97,7 @@ const chipStyles = StyleSheet.create({
 
 interface CardProps {
   item: UserResponse;
-  onAnswered: (id: string, followUp: UserResponse | null) => void;
+  onAnswered: (answeredItem: UserResponse, followUp: UserResponse | null) => void;
   onSkip: (id: string) => void;
 }
 
@@ -106,25 +106,31 @@ function getTransactionOptions(merchantName: string | null, category: string | n
   const m = (merchantName ?? '').toLowerCase();
   const c = (category ?? '').toLowerCase();
 
-  // ── Subscriptions / creative tools ───────────────────────────────────────
-  if (/capcut|adobe|figma|canva|notion|spotify|netflix|hulu|disney|apple|youtube|dropbox|slack/.test(m))
-    return ['Still using it', 'Forgot to cancel', 'Use it regularly', 'Could switch to free', 'Not sure'];
+  // ── Gas stations ──────────────────────────────────────────────────────────
+  if (/quiktrip|qt|shell|chevron|exxon|mobil|bp|sunoco|valero|circle k|speedway|wawa|loves|pilot|711|kwik/.test(m)
+      || c.includes('gas') || c.includes('fuel'))
+    return ['Filled up gas', 'Regular commute stop', 'Quick snack', 'Not sure'];
+
+  // ── Subscriptions / SaaS / hosting ───────────────────────────────────────
+  if (/capcut|adobe|figma|canva|notion|spotify|netflix|hulu|disney|apple|youtube|dropbox|slack|hostinger|namecheap|godaddy|digitalocean|aws|github|vercel|openai|claude/.test(m)
+      || c.includes('subscription') || c.includes('software'))
+    return ['Still actively using it', 'Cancelled it already', 'Forgot to cancel', 'Worth it for now', 'Not sure'];
 
   // ── Food delivery ─────────────────────────────────────────────────────────
   if (/uber eats|doordash|grubhub|instacart|postmates|seamless|caviar/.test(m) || c.includes('food_delivery'))
-    return ['Too tired to cook', 'Craving it', 'No groceries', 'With others', 'Just convenient'];
+    return ['Too tired to cook', 'Craving it', 'No groceries at home', 'Ordering for others', 'Just convenient'];
 
   // ── Coffee / café ─────────────────────────────────────────────────────────
   if (/starbucks|dunkin|coffee|cafe|espresso|blue bottle|peet/.test(m))
-    return ['Morning routine', 'Needed the boost', 'Was already out', 'Social', 'Just habit'];
+    return ['Morning routine', 'Needed the boost', 'Was already out', 'Social catch-up', 'Just habit'];
 
-  // ── Rideshare / transport ─────────────────────────────────────────────────
-  if (/uber|lyft|taxi|waymo/.test(m) || c.includes('transport'))
+  // ── Rideshare ─────────────────────────────────────────────────────────────
+  if (/uber|lyft|taxi|waymo/.test(m))
     return ['No other option', 'Convenience', 'Was running late', 'With others', 'Treating myself'];
 
   // ── Amazon / general shopping ─────────────────────────────────────────────
   if (/amazon/.test(m))
-    return ['Planned it', 'Saw it and acted', 'Prime impulse', 'Needed it', 'Not sure'];
+    return ['Planned it', 'Saw it and bought it', 'Prime impulse', 'Needed it', 'Not sure'];
 
   // ── Retail / clothing ─────────────────────────────────────────────────────
   if (/target|walmart|costco|zara|h&m|gap|uniqlo|lululemon|nike|adidas/.test(m) || c.includes('shopping'))
@@ -132,19 +138,19 @@ function getTransactionOptions(merchantName: string | null, category: string | n
 
   // ── Restaurants / dining ─────────────────────────────────────────────────
   if (c.includes('dining') || c.includes('restaurant') || c.includes('food'))
-    return ['Planned outing', 'Spontaneous', 'With friends', 'Treating myself', 'Convenient'];
+    return ['Treated myself', 'Paid for the group', 'Split the bill', 'Planned outing', 'Just convenient'];
 
   // ── Gaming / entertainment ────────────────────────────────────────────────
   if (/steam|playstation|xbox|nintendo|twitch|roblox/.test(m) || c.includes('entertainment'))
-    return ['Planned it', 'Impulse', 'On sale', 'Treat after a long day', 'Just happened'];
+    return ['Planned it', 'Impulse buy', 'On sale', 'Treat after a long day', 'Not sure'];
 
   // ── Health / fitness ──────────────────────────────────────────────────────
   if (/gym|fitness|peloton|yoga|equinox/.test(m) || c.includes('health'))
-    return ['Staying on track', 'Impulse sign-up', 'Feeling motivated', 'Social pressure', 'Routine'];
+    return ['Staying on track', 'Felt motivated', 'Part of my routine', 'Social pressure', 'Not sure'];
 
-  // ── Late night (by time context, no merchant match) ───────────────────────
-  if (c.includes('late') || c.includes('night'))
-    return ['Tired', 'Bored', 'Craving something', 'Treating myself', 'Not sure'];
+  // ── Transportation (non-rideshare) ────────────────────────────────────────
+  if (c.includes('transport'))
+    return ['Daily commute', 'One-off trip', 'No other option', 'Convenience', 'Not sure'];
 
   // ── Default ───────────────────────────────────────────────────────────────
   return ['Planned it', 'Spontaneous', 'Just habit', 'Treating myself', 'Not sure'];
@@ -174,9 +180,9 @@ function MomentCard({ item, onAnswered, onSkip }: CardProps) {
     setSelected(opt);
     setSubmitting(true);
     try {
-      const result = await submitReflectionAnswer(item.id, opt);
+      await submitReflectionAnswer(item.id, opt);
       setConfirmed(true);
-      setTimeout(() => onAnswered(item.id, result.followUp ?? null), 800);
+      onAnswered({ ...item, answer: opt }, null);
     } catch (e: any) {
       Alert.alert('Error', e.message ?? 'Could not save your answer. Try again.');
       setSelected(null);
@@ -195,7 +201,7 @@ function MomentCard({ item, onAnswered, onSkip }: CardProps) {
               {anchor.merchant_name ?? 'Transaction'}
             </Text>
             <Text style={cardStyles.receiptDate}>
-              {new Date((anchor as any).date + 'T00:00:00').toLocaleDateString('en-US', {
+              {new Date((anchor as any).date).toLocaleDateString('en-US', {
                 month: 'short', day: 'numeric',
               })}
             </Text>
@@ -395,22 +401,29 @@ export default function ReflectionScreen() {
   const [refreshing, setRefreshing]         = useState(false);
   const [recentlyAnswered, setRecentlyAnswered] = useState<UserResponse[]>([]);
   const [history, setHistory]               = useState<UserResponse[]>([]);
+  const skippedIds = useRef<Set<string>>(new Set());
 
   const load = async () => {
     const [questions, historyResponses] = await Promise.all([
       getPendingReflections().catch(() => []),
       getReflectionHistory(20).catch(() => []),
     ]);
-    setPending(questions);
-    setHistory(historyResponses);
+    // Deduplicate by anchor merchant — if two habits share the same merchant
+    // and transaction, only show one question
+    const seenMerchants = new Set<string>();
+    const deduped = (questions as UserResponse[]).filter((q) => {
+      if (skippedIds.current.has(q.id)) return false;
+      const merchant = q.sample_transactions?.[0]?.merchant_name;
+      if (!merchant) return true;
+      if (seenMerchants.has(merchant)) return false;
+      seenMerchants.add(merchant);
+      return true;
+    });
+    setPending(deduped);
+    setHistory((historyResponses as UserResponse[]).filter((r) => r.answer !== 'skipped'));
   };
 
   useEffect(() => { load().finally(() => setLoading(false)); }, []);
-
-  useFocusEffect(useCallback(() => {
-    setLoading(true);
-    load().finally(() => setLoading(false));
-  }, []));
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -418,16 +431,19 @@ export default function ReflectionScreen() {
     setRefreshing(false);
   }, []);
 
-  const handleAnswered = (id: string, followUp: UserResponse | null) => {
-    const answered = pending.find((q) => q.id === id);
-    setPending((prev) => prev.filter((q) => q.id !== id));
-    if (answered) setRecentlyAnswered((prev) => [{ ...answered }, ...prev]);
-    if (followUp)  setPending((prev) => [followUp, ...prev]);
-  };
+  const handleAnswered = useCallback((answeredItem: UserResponse, followUp: UserResponse | null) => {
+    setPending((prev) => {
+      const filtered = prev.filter((q) => q.id !== answeredItem.id);
+      return followUp ? [...filtered, followUp] : filtered;
+    });
+    setRecentlyAnswered((prev) => [answeredItem, ...prev]);
+  }, []);
 
-  const handleSkip = (id: string) => {
+  const handleSkip = useCallback((id: string) => {
+    skippedIds.current.add(id);
     setPending((prev) => prev.filter((q) => q.id !== id));
-  };
+    submitReflectionAnswer(id, 'skipped').catch(() => {});
+  }, []);
 
   const hasPending = pending.length > 0;
   const hasHistory  = history.length > 0;

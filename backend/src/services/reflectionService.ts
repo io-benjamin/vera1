@@ -16,22 +16,56 @@ export class ReflectionService {
 
   /**
    * Generate and store Tier 1 (initial) questions for a detected habit.
-   * Skips if unanswered questions already exist for this pattern.
+   * Always deletes existing unanswered questions and recreates them so
+   * dynamic chip options stay fresh with every habit detection cycle.
    */
   async generateQuestionsForHabit(
     userId: string,
     patternId: string,
     habit: DetectedHabit
   ): Promise<UserResponse[]> {
-    const existing = await this.pool.query(
-      `SELECT id FROM user_responses
-       WHERE user_id = $1 AND pattern_id = $2 AND answered_at IS NULL`,
+    // If the user has already answered a question about this merchant (regardless of which
+    // habit type or pattern_id detected it), don't generate again. The same transaction
+    // can appear under different habit types across re-detections, so we key on merchant.
+    const primaryMerchant = habit.trigger_conditions?.merchants?.[0] ?? null;
+
+    let alreadyTagged = false;
+
+    if (primaryMerchant) {
+      const merchantAnswered = await this.pool.query(
+        `SELECT ur.id FROM user_responses ur
+         INNER JOIN detected_habits dh ON ur.pattern_id = dh.id
+         WHERE ur.user_id = $1
+           AND ur.answered_at IS NOT NULL
+           AND dh.trigger_conditions->'merchants' @> $2::jsonb
+         LIMIT 1`,
+        [userId, JSON.stringify([primaryMerchant])]
+      );
+      alreadyTagged = merchantAnswered.rows.length > 0;
+    } else {
+      // No merchant — fall back to checking the exact pattern_id
+      const patternAnswered = await this.pool.query(
+        `SELECT id FROM user_responses
+         WHERE user_id = $1 AND pattern_id = $2 AND answered_at IS NOT NULL
+         LIMIT 1`,
+        [userId, patternId]
+      );
+      alreadyTagged = patternAnswered.rows.length > 0;
+    }
+
+    if (alreadyTagged) {
+      await this.pool.query(
+        `DELETE FROM user_responses WHERE user_id = $1 AND pattern_id = $2 AND answered_at IS NULL`,
+        [userId, patternId]
+      );
+      return [];
+    }
+
+    // No prior answers for this merchant — delete stale unanswered and recreate fresh
+    await this.pool.query(
+      `DELETE FROM user_responses WHERE user_id = $1 AND pattern_id = $2 AND answered_at IS NULL`,
       [userId, patternId]
     );
-
-    if (existing.rows.length > 0) {
-      return this.getPendingQuestionsForPattern(userId, patternId);
-    }
 
     const questions = getInitialQuestions(habit);
     const created: UserResponse[] = [];
@@ -120,11 +154,21 @@ export class ReflectionService {
     const followUpQ = getFollowUpQuestion(habitType, previousAnswer);
     if (!followUpQ) return null;
 
-    const result = await this.pool.query(
+    // Never create the same follow-up question twice — if this exact question
+    // has already been asked (answered or not) for this pattern, stop here
+    const alreadyAsked = await this.pool.query(
+      `SELECT id FROM user_responses
+       WHERE user_id = $1 AND pattern_id = $2 AND question = $3
+       LIMIT 1`,
+      [userId, patternId, followUpQ.question]
+    );
+    if (alreadyAsked.rows.length > 0) return null;
+
+    const insertResult = await this.pool.query(
       `INSERT INTO user_responses
          (user_id, pattern_id, question, response_type, options)
        VALUES ($1, $2, $3, $4, $5)
-       RETURNING *`,
+       RETURNING id`,
       [
         userId,
         patternId,
@@ -132,6 +176,15 @@ export class ReflectionService {
         followUpQ.response_type,
         followUpQ.options ? JSON.stringify(followUpQ.options) : null,
       ]
+    );
+
+    // Fetch with JOIN so sample_transactions is populated on the returned row
+    const result = await this.pool.query(
+      `SELECT r.*, h.title as pattern_title, h.habit_type, h.sample_transactions as habit_sample_transactions
+       FROM user_responses r
+       LEFT JOIN detected_habits h ON r.pattern_id = h.id
+       WHERE r.id = $1`,
+      [insertResult.rows[0].id]
     );
 
     return this.mapRow(result.rows[0]);
@@ -227,11 +280,22 @@ export class ReflectionService {
    */
   async getPendingQuestions(userId: string): Promise<UserResponse[]> {
     const result = await this.pool.query(
-      `SELECT r.*, h.title as pattern_title, h.habit_type, h.sample_transactions as habit_sample_transactions
+      `SELECT DISTINCT ON (r.pattern_id, r.question)
+              r.*, h.title as pattern_title, h.habit_type, h.sample_transactions as habit_sample_transactions
        FROM user_responses r
-       LEFT JOIN detected_habits h ON r.pattern_id = h.id
-       WHERE r.user_id = $1 AND r.answered_at IS NULL
-       ORDER BY r.created_at ASC`,
+       INNER JOIN detected_habits h ON r.pattern_id = h.id
+       WHERE r.user_id = $1
+         AND r.answered_at IS NULL
+         AND h.sample_transactions IS NOT NULL
+         AND jsonb_array_length(h.sample_transactions) > 0
+         AND NOT EXISTS (
+           SELECT 1 FROM user_responses prev
+           WHERE prev.user_id = r.user_id
+             AND prev.pattern_id = r.pattern_id
+             AND prev.question = r.question
+             AND prev.answered_at IS NOT NULL
+         )
+       ORDER BY r.pattern_id, r.question, r.created_at ASC`,
       [userId]
     );
     return result.rows.map(this.mapRow);
@@ -290,7 +354,7 @@ export class ReflectionService {
   async generateSignatureMoment(
     userId: string,
     currentAnswer: string,
-    currentQuestion: string
+    _currentQuestion: string
   ): Promise<{ callback: string; emoji: string } | null> {
     // Get recent answered responses to find patterns
     const recentResponses = await this.getAnsweredResponses(userId, 10);
